@@ -89,7 +89,8 @@ class DigitRecognitionApp:
         self.brush_size = 20
         
         # Số lần làm dày nét (dilation) - quan trọng cho nét bút mỏng
-        self.dilate_iterations = tk.IntVar(value=2)
+        # Mặc định 3 để xử lý tốt hơn nét mỏng trên giấy trắng
+        self.dilate_iterations = tk.IntVar(value=3)
         
         # Image để vẽ (nền đen)
         self.image = Image.new('L', (self.canvas_size, self.canvas_size), color=0)
@@ -170,20 +171,27 @@ class DigitRecognitionApp:
         dilate_frame.pack(pady=5, fill=tk.X)
         
         dilate_label = ttk.Label(dilate_frame, 
-                                 text="Tăng nếu nét bút mỏng trên giấy trắng:")
+                                 text="Tăng lên 4-6 nếu nét bút MỎNG trên giấy trắng:")
         dilate_label.pack()
         
-        dilate_slider = ttk.Scale(dilate_frame, from_=0, to=5, 
+        dilate_slider = ttk.Scale(dilate_frame, from_=0, to=8, 
                                   variable=self.dilate_iterations, 
                                   orient=tk.HORIZONTAL)
         dilate_slider.pack(fill=tk.X, padx=5)
         
-        self.dilate_value_label = ttk.Label(dilate_frame, text="Mức: 2")
+        self.dilate_value_label = ttk.Label(dilate_frame, text="Mức: 3 (mặc định)")
         self.dilate_value_label.pack()
         
         def update_dilate_label(*args):
             val = self.dilate_iterations.get()
-            self.dilate_value_label.config(text=f"Mức: {val}")
+            hint = ""
+            if val <= 2:
+                hint = " (nét đậm)"
+            elif val <= 4:
+                hint = " (bình thường)"
+            else:
+                hint = " (nét rất mỏng)"
+            self.dilate_value_label.config(text=f"Mức: {val}{hint}")
         
         self.dilate_iterations.trace_add("write", update_dilate_label)
         
@@ -513,79 +521,124 @@ class DigitRecognitionApp:
         except Exception as e:
             messagebox.showerror("Lỗi", f"Không thể xử lý ảnh: {str(e)}")
     
-    def load_and_preprocess_uploaded_image(self, image_path, dilate_iterations=2):
+    def load_and_preprocess_uploaded_image(self, image_path, dilate_iterations=3):
         """
         Tải và tiền xử lý ảnh từ file để phù hợp với MNIST.
+        
+        ĐẶC BIỆT TỐI ƯU CHO NÉT BÚT MỎNG TRÊN GIẤY TRẮNG!
         
         QUAN TRỌNG: MNIST có các đặc điểm sau:
         - Kích thước 28x28 pixels
         - Nền đen (0), chữ trắng (255)
         - Chữ số được căn giữa với bounding box
-        - NÉT CHỮ TƯƠNG ĐỐI DÀY (2-4 pixels)
+        - NÉT CHỮ TƯƠNG ĐỐI DÀY (2-4 pixels trong 28x28)
         
         Parameters:
         -----------
         image_path : str
             Đường dẫn đến file ảnh
         dilate_iterations : int
-            Số lần làm dày nét chữ (mặc định 2, tăng nếu nét quá mỏng)
+            Số lần làm dày nét chữ (mặc định 3, tăng lên 4-5 nếu nét rất mỏng)
         """
-        from PIL import ImageFilter, ImageOps
+        from PIL import ImageFilter, ImageOps, ImageEnhance
         
         # Đọc ảnh và chuyển sang grayscale
         img = Image.open(image_path).convert('L')
         img_array = np.array(img, dtype=np.float64)
+        original_shape = img_array.shape
         
         # =====================================================================
-        # BƯỚC 1: TĂNG CƯỜNG ĐỘ TƯƠNG PHẢN
-        # Rất quan trọng cho nét bút mỏng trên giấy trắng
+        # BƯỚC 1: TĂNG CƯỜNG ĐỘ TƯƠNG PHẢN (ĐẶC BIỆT QUAN TRỌNG CHO NÉT MỎNG)
         # =====================================================================
         img_pil = Image.fromarray(img_array.astype(np.uint8))
-        img_pil = ImageOps.autocontrast(img_pil, cutoff=2)
+        
+        # AutoContrast mạnh hơn cho nét mỏng
+        img_pil = ImageOps.autocontrast(img_pil, cutoff=1)
+        
+        # Tăng contrast thêm 1.5x
+        enhancer = ImageEnhance.Contrast(img_pil)
+        img_pil = enhancer.enhance(1.5)
+        
         img_array = np.array(img_pil, dtype=np.float64)
         
         # =====================================================================
         # BƯỚC 2: ĐẢO NGƯỢC MÀU NẾU NỀN SÁNG (MNIST CÓ NỀN ĐEN)
         # =====================================================================
-        # Kiểm tra nền: lấy giá trị ở các góc và cạnh
-        corners = [
+        h, w = img_array.shape
+        sample_points = [
             img_array[0, 0], img_array[0, -1], 
             img_array[-1, 0], img_array[-1, -1],
-            img_array[0, img_array.shape[1]//2],
-            img_array[-1, img_array.shape[1]//2],
-            img_array[img_array.shape[0]//2, 0],
-            img_array[img_array.shape[0]//2, -1]
+            img_array[0, w//2], img_array[-1, w//2],
+            img_array[h//2, 0], img_array[h//2, -1],
+            # Thêm các điểm ở gần góc để chính xác hơn
+            img_array[min(10, h-1), min(10, w-1)],
+            img_array[min(10, h-1), max(0, w-11)],
+            img_array[max(0, h-11), min(10, w-1)],
+            img_array[max(0, h-11), max(0, w-11)]
         ]
-        background_value = np.median(corners)
+        background_value = np.median(sample_points)
         
         # Đảo màu nếu nền sáng (viết trên giấy trắng)
         if background_value > 127:
             img_array = 255 - img_array
         
         # =====================================================================
-        # BƯỚC 3: LÀM DÀY NÉT CHỮ (MORPHOLOGICAL DILATION)
-        # Rất quan trọng cho nét bút mỏng!
+        # BƯỚC 3: XỬ LÝ NHIỄU VÀ CHUẨN BỊ CHO NÉT MỎNG
+        # =====================================================================
+        noise_threshold = 15
+        img_array[img_array < noise_threshold] = 0
+        
+        # =====================================================================
+        # BƯỚC 4: LÀM MỊN VÀ KẾT NỐI NÉT ĐỨT (MORPHOLOGICAL CLOSING)
+        # Rất quan trọng cho nét bút mỏng bị đứt đoạn!
+        # =====================================================================
+        img_pil = Image.fromarray(img_array.astype(np.uint8))
+        
+        # Làm mờ nhẹ để kết nối các nét đứt gần nhau
+        img_pil = img_pil.filter(ImageFilter.GaussianBlur(radius=0.8))
+        
+        img_array = np.array(img_pil, dtype=np.float64)
+        
+        # =====================================================================
+        # BƯỚC 5: LÀM DÀY NÉT CHỮ (MORPHOLOGICAL DILATION)
+        # Đây là bước QUAN TRỌNG NHẤT cho nét bút mỏng!
         # =====================================================================
         if dilate_iterations > 0:
             img_pil = Image.fromarray(img_array.astype(np.uint8))
-            for _ in range(dilate_iterations):
+            
+            # Tính số lần dilate dựa trên kích thước ảnh
+            scale_factor = max(original_shape) / 200.0
+            adjusted_iterations = max(dilate_iterations, int(dilate_iterations * scale_factor))
+            adjusted_iterations = min(adjusted_iterations, 8)  # Giới hạn tối đa
+            
+            for _ in range(adjusted_iterations):
                 img_pil = img_pil.filter(ImageFilter.MaxFilter(size=3))
+            
             img_array = np.array(img_pil, dtype=np.float64)
         
         # =====================================================================
-        # BƯỚC 4: NHẬN DIỆN NGƯỠNG VÀ LỌC NHIỄU
+        # BƯỚC 6: MORPHOLOGICAL CLOSING ĐỂ ĐÓNG CÁC LỖ NHỎ
+        # Giúp tránh nhận nhầm thành số 8
         # =====================================================================
-        if img_array.max() > 0:
-            non_zero_pixels = img_array[img_array > 10]
-            if len(non_zero_pixels) > 0:
-                threshold = max(30, np.percentile(non_zero_pixels, 30))
-            else:
-                threshold = 30
-        else:
-            threshold = 30
+        img_pil = Image.fromarray(img_array.astype(np.uint8))
+        img_pil = img_pil.filter(ImageFilter.MinFilter(size=3))
+        img_pil = img_pil.filter(ImageFilter.MaxFilter(size=3))
+        img_array = np.array(img_pil, dtype=np.float64)
         
         # =====================================================================
-        # BƯỚC 5: TÌM BOUNDING BOX VÀ CĂN GIỮA
+        # BƯỚC 7: NHẬN DIỆN NGƯỠNG VÀ LỌC NHIỄU CUỐI CÙNG
+        # =====================================================================
+        if img_array.max() > 0:
+            non_zero_pixels = img_array[img_array > 5]
+            if len(non_zero_pixels) > 0:
+                threshold = max(20, np.percentile(non_zero_pixels, 20))
+            else:
+                threshold = 20
+        else:
+            threshold = 20
+        
+        # =====================================================================
+        # BƯỚC 8: TÌM BOUNDING BOX VÀ CĂN GIỮA
         # =====================================================================
         coords = np.where(img_array > threshold)
         
@@ -593,8 +646,8 @@ class DigitRecognitionApp:
             y_min, y_max = coords[0].min(), coords[0].max()
             x_min, x_max = coords[1].min(), coords[1].max()
             
-            # Thêm padding nhỏ
-            padding = 5
+            # Thêm padding lớn hơn cho nét mỏng
+            padding = 8
             y_min = max(0, y_min - padding)
             y_max = min(img_array.shape[0] - 1, y_max + padding)
             x_min = max(0, x_min - padding)
@@ -627,12 +680,21 @@ class DigitRecognitionApp:
             resized_digit = np.array(digit_img, dtype=np.float64)
             final_array[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = resized_digit
             
-            return final_array
+            img_array = final_array
         else:
             # Resize đơn giản nếu không tìm thấy chữ số
             img = Image.fromarray(img_array.astype(np.uint8))
             img = img.resize((28, 28), Image.Resampling.LANCZOS)
-            return np.array(img, dtype=np.float64)
+            img_array = np.array(img, dtype=np.float64)
+        
+        # =====================================================================
+        # BƯỚC 9: LÀM DÀY THÊM SAU KHI RESIZE (CHO NÉT MỎNG)
+        # =====================================================================
+        img_pil = Image.fromarray(img_array.astype(np.uint8))
+        img_pil = img_pil.filter(ImageFilter.MaxFilter(size=3))
+        final_array = np.array(img_pil, dtype=np.float64)
+        
+        return final_array
 
 
 # ============================================================================

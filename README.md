@@ -118,7 +118,7 @@ python test_model_cli.py
 # Test với nhiều mẫu hơn
 python test_model_cli.py --samples 10
 
-# Test với file ảnh
+# Test với file ảnh (tự động bật chế độ nét mỏng)
 python test_model_cli.py --image path/to/your/digit.png
 
 # Đánh giá model trên toàn bộ test set
@@ -127,6 +127,42 @@ python test_model_cli.py --evaluate
 # Không hiển thị đồ thị
 python test_model_cli.py --no-plot
 ```
+
+### ⚠️ Xử lý NÉT BÚT MỎNG trên giấy trắng
+
+Nếu bạn gặp vấn đề nhận diện sai với ảnh nét bút mỏng trên giấy trắng (thường hay bị nhầm thành số 8), hãy thử các cách sau:
+
+```bash
+# Cách 1: Tăng số lần làm dày nét (dilate)
+python test_model_cli.py --image my_digit.png --dilate 5
+
+# Cách 2: Tăng độ tương phản (contrast)
+python test_model_cli.py --image my_digit.png --contrast 2.0
+
+# Cách 3: Kết hợp cả hai (KHUYẾN NGHỊ cho nét rất mỏng)
+python test_model_cli.py --image my_digit.png --dilate 5 --contrast 2.0
+
+# Debug để xem quá trình xử lý ảnh
+python test_model_cli.py --image my_digit.png --debug
+
+# Nếu ảnh đã có nét đậm sẵn, tắt chế độ nét mỏng
+python test_model_cli.py --image my_digit.png --no-thin-mode
+```
+
+**Các tham số quan trọng:**
+
+| Tham số | Mô tả | Mặc định | Gợi ý cho nét mỏng |
+|---------|-------|----------|-------------------|
+| `--dilate` | Số lần làm dày nét | 3 | Tăng lên 4-6 |
+| `--contrast` | Hệ số tăng tương phản | 1.5 | Tăng lên 1.8-2.5 |
+| `--no-thin-mode` | Tắt chế độ nét mỏng | False | Dùng cho ảnh nét đậm |
+| `--debug` | Hiển thị thông tin debug | False | Bật để xem xử lý |
+
+**Mẹo để nhận diện tốt hơn:**
+1. 📸 Chụp ảnh đủ sáng, rõ nét
+2. ✏️ Chữ số nên chiếm phần lớn khung hình
+3. 📝 Viết nét đậm hơn nếu có thể
+4. 🖼️ Tránh nhiễu/bóng trên nền giấy
 
 ## 📁 Cấu trúc Project
 
@@ -200,6 +236,37 @@ result = predict_digit(model, image)
 print(f"Prediction: {result['prediction']}")
 print(f"Confidence: {result['confidence']:.4f}")
 print(f"Probabilities: {result['probabilities']}")
+```
+
+### Tiền xử lý ảnh nét bút mỏng (quan trọng!)
+
+```python
+from test_model_cli import preprocess_digit_image, load_model
+from PIL import Image
+import numpy as np
+
+# Load mô hình
+model = load_model()
+
+# Đọc ảnh từ file
+img = Image.open('my_digit.png').convert('L')
+img_array = np.array(img)
+
+# Tiền xử lý với các tham số tối ưu cho nét mỏng
+processed = preprocess_digit_image(
+    img_array,
+    dilate_iterations=4,      # Số lần làm dày nét (tăng nếu nét mỏng)
+    thin_stroke_mode=True,    # Bật chế độ nét mỏng
+    contrast_factor=1.8,      # Tăng độ tương phản
+    debug=True                # Hiển thị thông tin debug
+)
+
+# Dự đoán
+prediction = model.predict(processed.reshape(1, -1))[0]
+probabilities = model.predict_proba(processed.reshape(1, -1))[0]
+
+print(f"Dự đoán: {prediction}")
+print(f"Độ tin cậy: {probabilities[prediction]:.2%}")
 ```
 
 ### Load đầu ra cho Ensemble
