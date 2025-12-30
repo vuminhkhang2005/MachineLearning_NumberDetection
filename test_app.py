@@ -3,14 +3,15 @@
 
 Ứng dụng này cho phép bạn:
 1. Vẽ chữ số trực tiếp trên canvas
-2. Xem kết quả dự đoán và xác suất
+2. Upload ảnh chữ số từ máy tính
+3. Xem kết quả dự đoán và xác suất
 
 Sử dụng:
     python test_app.py
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import numpy as np
 import os
 import joblib
@@ -149,7 +150,15 @@ class DigitRecognitionApp:
                                command=self.clear_canvas, style='Secondary.TButton')
         clear_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
         
-        test_btn = ttk.Button(btn_frame, text="🎲 Test MNIST", 
+        # Thêm hàng nút thứ hai
+        btn_frame2 = ttk.Frame(left_frame)
+        btn_frame2.pack(pady=5, fill=tk.X)
+        
+        upload_btn = ttk.Button(btn_frame2, text="📂 Tải ảnh lên", 
+                                command=self.upload_image, style='Secondary.TButton')
+        upload_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+        
+        test_btn = ttk.Button(btn_frame2, text="🎲 Test MNIST", 
                               command=self.test_mnist_sample, style='Secondary.TButton')
         test_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
         
@@ -398,6 +407,140 @@ class DigitRecognitionApp:
             
         except Exception as e:
             messagebox.showerror("Lỗi", f"Không thể tải MNIST: {str(e)}")
+    
+    def upload_image(self):
+        """Upload và nhận dạng ảnh từ máy tính."""
+        # Mở dialog chọn file
+        file_types = [
+            ("Image files", "*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.webp"),
+            ("PNG files", "*.png"),
+            ("JPEG files", "*.jpg *.jpeg"),
+            ("All files", "*.*")
+        ]
+        
+        file_path = filedialog.askopenfilename(
+            title="Chọn ảnh chữ số",
+            filetypes=file_types,
+            initialdir=os.getcwd()
+        )
+        
+        if not file_path:
+            return  # Người dùng hủy
+        
+        try:
+            self.result_label.config(text=f"Đang xử lý: {os.path.basename(file_path)}...")
+            self.root.update()
+            
+            # Đọc và tiền xử lý ảnh
+            processed = self.load_and_preprocess_uploaded_image(file_path)
+            
+            # Chuẩn hóa và flatten
+            img_flat = (processed / 255.0).reshape(1, -1)
+            
+            # Dự đoán
+            prediction = self.model.predict(img_flat)[0]
+            probabilities = self.model.predict_proba(img_flat)[0]
+            confidence = probabilities[prediction]
+            
+            # Xóa canvas và hiển thị ảnh đã upload
+            self.clear_canvas()
+            
+            # Hiển thị ảnh gốc (scale để fit canvas)
+            original_img = Image.open(file_path).convert('L')
+            # Scale để fit vào canvas nhưng giữ tỷ lệ
+            orig_w, orig_h = original_img.size
+            scale = min(self.canvas_size / orig_w, self.canvas_size / orig_h)
+            new_w, new_h = int(orig_w * scale), int(orig_h * scale)
+            original_scaled = original_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            
+            # Tạo ảnh nền đen với ảnh ở giữa
+            display_img = Image.new('L', (self.canvas_size, self.canvas_size), color=0)
+            x_offset = (self.canvas_size - new_w) // 2
+            y_offset = (self.canvas_size - new_h) // 2
+            display_img.paste(original_scaled, (x_offset, y_offset))
+            
+            photo = ImageTk.PhotoImage(display_img)
+            self.canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+            self.canvas.image = photo  # Giữ reference
+            
+            # Hiển thị kết quả
+            self.prediction_label.config(text=str(prediction), foreground='#27ae60')
+            self.confidence_label.config(text=f"Độ tin cậy: {confidence:.1%}")
+            
+            # Top 3
+            top3_idx = np.argsort(probabilities)[::-1][:3]
+            result_text = f"📂 File: {os.path.basename(file_path)}\n\n"
+            result_text += "Top 3 dự đoán:\n"
+            for i, idx in enumerate(top3_idx):
+                emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉"
+                result_text += f"{emoji} Chữ số {idx}: {probabilities[idx]:.1%}\n"
+            self.result_label.config(text=result_text)
+            
+            # Hiển thị biểu đồ
+            self.show_probability_chart(probabilities)
+            
+            # Hiển thị ảnh đã xử lý (28x28)
+            self.show_processed_image(processed)
+            
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể xử lý ảnh: {str(e)}")
+    
+    def load_and_preprocess_uploaded_image(self, image_path):
+        """
+        Tải và tiền xử lý ảnh từ file để phù hợp với MNIST.
+        
+        QUAN TRỌNG: MNIST có các đặc điểm sau:
+        - Kích thước 28x28 pixels
+        - Nền đen (0), chữ trắng (255)
+        - Chữ số được căn giữa với bounding box
+        """
+        # Đọc ảnh và chuyển sang grayscale
+        img = Image.open(image_path).convert('L')
+        img_array = np.array(img, dtype=np.float64)
+        
+        # Đảo ngược màu nếu nền sáng (MNIST có nền đen)
+        if img_array.mean() > 127:
+            img_array = 255 - img_array
+        
+        # Tìm bounding box của chữ số và căn giữa (giống MNIST)
+        threshold = 20
+        coords = np.where(img_array > threshold)
+        
+        if len(coords[0]) > 0 and len(coords[1]) > 0:
+            y_min, y_max = coords[0].min(), coords[0].max()
+            x_min, x_max = coords[1].min(), coords[1].max()
+            
+            # Cắt vùng chứa chữ số
+            digit_region = img_array[y_min:y_max+1, x_min:x_max+1]
+            
+            # Resize digit region về 20x20 (MNIST để margin 4 pixel mỗi bên)
+            digit_img = Image.fromarray(digit_region.astype(np.uint8))
+            
+            # Giữ tỷ lệ khung hình
+            aspect = digit_region.shape[1] / digit_region.shape[0]
+            if aspect > 1:
+                new_width = 20
+                new_height = max(1, int(20 / aspect))
+            else:
+                new_height = 20
+                new_width = max(1, int(20 * aspect))
+            
+            digit_img = digit_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            # Tạo ảnh 28x28 với nền đen và đặt chữ số vào giữa
+            final_array = np.zeros((28, 28), dtype=np.float64)
+            
+            y_offset = (28 - new_height) // 2
+            x_offset = (28 - new_width) // 2
+            
+            final_array[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = np.array(digit_img)
+            
+            return final_array
+        else:
+            # Resize đơn giản nếu không tìm thấy chữ số
+            img = Image.fromarray(img_array.astype(np.uint8))
+            img = img.resize((28, 28), Image.Resampling.LANCZOS)
+            return np.array(img, dtype=np.float64)
 
 
 # ============================================================================
