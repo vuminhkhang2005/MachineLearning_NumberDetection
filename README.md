@@ -78,13 +78,57 @@ python svm_digit_recognition.py --use-pca --pca-components 100
 | `--use-pca` | Sử dụng PCA giảm chiều | False |
 | `--pca-components` | Số thành phần PCA | 100 |
 
+## 🧪 Test Model
+
+### Cách 1: Ứng dụng Web (Gradio)
+
+Ứng dụng web cho phép bạn vẽ chữ số hoặc upload ảnh để test model.
+
+```bash
+# Cài đặt Gradio
+pip install gradio
+
+# Chạy ứng dụng web
+python test_app.py
+```
+
+Sau đó mở trình duyệt và truy cập: http://localhost:7860
+
+**Tính năng:**
+- ✏️ Vẽ chữ số trực tiếp trên canvas
+- 📤 Upload ảnh chữ số viết tay
+- 🎲 Test với mẫu ngẫu nhiên từ MNIST
+- 📊 Hiển thị biểu đồ xác suất dự đoán
+
+### Cách 2: Command Line (CLI)
+
+```bash
+# Test với mẫu MNIST ngẫu nhiên (mặc định 5 mẫu)
+python test_model_cli.py
+
+# Test với nhiều mẫu hơn
+python test_model_cli.py --samples 10
+
+# Test với file ảnh
+python test_model_cli.py --image path/to/your/digit.png
+
+# Đánh giá model trên toàn bộ test set
+python test_model_cli.py --evaluate
+
+# Không hiển thị đồ thị
+python test_model_cli.py --no-plot
+```
+
 ## 📁 Cấu trúc Project
 
 ```
 /workspace
 ├── README.md                      # Tài liệu hướng dẫn
+├── requirements.txt               # Dependencies
 ├── svm_digit_recognition.ipynb    # Jupyter Notebook (Google Colab)
-├── svm_digit_recognition.py       # Python script
+├── svm_digit_recognition.py       # Python script huấn luyện
+├── test_app.py                    # 🆕 Ứng dụng web test (Gradio)
+├── test_model_cli.py              # 🆕 CLI test model
 └── outputs/                       # Thư mục đầu ra (tự động tạo)
     ├── svm_digit_classifier.joblib      # Mô hình đã train
     ├── svm_predictions_for_ensemble.csv # Predictions cho ensemble

@@ -7,6 +7,8 @@ matplotlib>=3.4.0
 seaborn>=0.11.0
 scikit-learn>=1.0.0
 joblib>=1.1.0
+Pillow>=9.0.0
+gradio>=4.0.0
 
 # Optional: For GPU acceleration on Google Colab
 # Uncomment and run: pip install cuml-cu11 --extra-index-url=https://pypi.nvidia.com
