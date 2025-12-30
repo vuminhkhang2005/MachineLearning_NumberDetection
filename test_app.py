@@ -398,12 +398,24 @@ with gr.Blocks(css=custom_css, title="🔢 Test Nhận dạng Chữ số") as de
 # ============================================================================
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Test Digit Recognition App')
+    parser.add_argument('--share', action='store_true', 
+                        help='Tạo public link để chia sẻ qua internet')
+    parser.add_argument('--port', type=int, default=7860,
+                        help='Port để chạy server (default: 7860)')
+    args = parser.parse_args()
+    
     print("\n🚀 Khởi động ứng dụng...")
-    print("📍 Truy cập: http://localhost:7860")
-    print("📍 Hoặc: http://0.0.0.0:7860")
+    print(f"📍 Truy cập local: http://localhost:{args.port}")
+    
+    if args.share:
+        print("🌐 Đang tạo public link...")
+    
     demo.launch(
         server_name="0.0.0.0",
-        server_port=7860,
-        share=False,
+        server_port=args.port,
+        share=args.share,  # True = tạo public link
         show_error=True
     )
