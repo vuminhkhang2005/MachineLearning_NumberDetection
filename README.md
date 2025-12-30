@@ -104,6 +104,7 @@ python test_app.py
 
 **Tính năng:**
 - ✏️ Vẽ chữ số trực tiếp trên canvas
+- 📂 Upload ảnh chữ số từ máy tính (PNG, JPG, BMP, GIF, TIFF, WebP)
 - 🎲 Test với mẫu ngẫu nhiên từ MNIST
 - 📊 Hiển thị biểu đồ xác suất dự đoán
 - 🖼️ Xem ảnh đã xử lý (28x28)
