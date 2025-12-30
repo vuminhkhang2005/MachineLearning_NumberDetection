@@ -43,23 +43,29 @@ def train_new_model():
     """Huấn luyện model mới nếu chưa có."""
     from sklearn.datasets import fetch_openml
     from sklearn.model_selection import train_test_split
-    from sklearn.preprocessing import StandardScaler
     from sklearn.svm import SVC
-    from sklearn.pipeline import Pipeline
     
     print("📥 Đang tải dữ liệu MNIST...")
     X, y = fetch_openml('mnist_784', version=1, return_X_y=True, as_frame=False, parser='auto')
     y = y.astype(int)
-    X = X.astype(np.float32) / 255.0
+    # Chuẩn hóa đơn giản về [0, 1] - KHÔNG dùng StandardScaler
+    X = X.astype(np.float64) / 255.0
     
-    # Sử dụng tập con để train nhanh
-    X_train, _, y_train, _ = train_test_split(X, y, train_size=10000, random_state=42, stratify=y)
+    # Sử dụng 30000 mẫu để train (cân bằng giữa tốc độ và độ chính xác)
+    X_train, _, y_train, _ = train_test_split(X, y, train_size=30000, random_state=42, stratify=y)
     
     print("🏋️ Đang huấn luyện model SVM...")
-    model = Pipeline([
-        ('scaler', StandardScaler()),
-        ('svc', SVC(kernel='rbf', C=1.0, gamma='scale', probability=True, cache_size=1000))
-    ])
+    print("   (Quá trình này có thể mất vài phút...)")
+    
+    # KHÔNG dùng Pipeline với StandardScaler - tránh vấn đề không khớp khi dự đoán
+    model = SVC(
+        kernel='rbf', 
+        C=10.0,  # Tối ưu cho MNIST
+        gamma=0.01,  # Tối ưu cho MNIST
+        probability=True, 
+        cache_size=2000,
+        random_state=42
+    )
     model.fit(X_train, y_train)
     
     # Lưu model
@@ -72,7 +78,13 @@ def train_new_model():
 
 def preprocess_image(image):
     """
-    Tiền xử lý ảnh đầu vào để phù hợp với model.
+    Tiền xử lý ảnh đầu vào để phù hợp với model MNIST.
+    
+    QUAN TRỌNG: MNIST có các đặc điểm sau:
+    - Kích thước 28x28 pixels
+    - Nền đen (0), chữ trắng (255)
+    - Chữ số được căn giữa với bounding box
+    - Giá trị pixel đã chuẩn hóa về [0, 1]
     
     Parameters:
     -----------
@@ -91,30 +103,78 @@ def preprocess_image(image):
         # Nếu là ảnh từ canvas (có thể là RGBA)
         if len(image.shape) == 3:
             if image.shape[2] == 4:  # RGBA
-                # Lấy alpha channel hoặc chuyển sang grayscale
+                # Lấy alpha channel (nét vẽ nằm trong alpha)
+                alpha = image[:, :, 3]
+                # Hoặc chuyển sang grayscale
                 img = Image.fromarray(image).convert('L')
+                img_array_temp = np.array(img)
+                # Kết hợp với alpha để lấy nét vẽ
+                if alpha.max() > 0:
+                    img_array_temp = alpha
+                img = Image.fromarray(img_array_temp.astype(np.uint8))
             else:  # RGB
                 img = Image.fromarray(image).convert('L')
         else:  # Grayscale
-            img = Image.fromarray(image)
+            img = Image.fromarray(image.astype(np.uint8))
     else:
         img = image.convert('L')
     
-    # Resize về 28x28
-    img = img.resize((28, 28), Image.Resampling.LANCZOS)
-    
     # Chuyển sang numpy array
-    img_array = np.array(img, dtype=np.float32)
+    img_array = np.array(img, dtype=np.float64)
     
-    # Đảo ngược màu nếu cần (MNIST có nền đen, chữ trắng)
-    # Kiểm tra nếu nền sáng hơn chữ
+    # Xác định xem nền sáng hay tối
+    # MNIST có nền đen (0), chữ trắng (255)
+    # Nếu giá trị trung bình của ảnh > 127, nghĩa là nền sáng -> đảo màu
     if img_array.mean() > 127:
         img_array = 255 - img_array
     
-    # Chuẩn hóa về [0, 1]
+    # Tìm bounding box của chữ số và căn giữa (giống MNIST)
+    # Điều này rất quan trọng để ảnh vẽ tay khớp với MNIST
+    threshold = 20  # Ngưỡng để xác định pixel thuộc chữ
+    coords = np.where(img_array > threshold)
+    
+    if len(coords[0]) > 0 and len(coords[1]) > 0:
+        y_min, y_max = coords[0].min(), coords[0].max()
+        x_min, x_max = coords[1].min(), coords[1].max()
+        
+        # Cắt vùng chứa chữ số
+        digit_region = img_array[y_min:y_max+1, x_min:x_max+1]
+        
+        # Resize digit region về 20x20 (MNIST để margin 4 pixel mỗi bên)
+        digit_img = Image.fromarray(digit_region.astype(np.uint8))
+        
+        # Giữ tỷ lệ khung hình
+        aspect = digit_region.shape[1] / digit_region.shape[0]
+        if aspect > 1:  # Rộng hơn cao
+            new_width = 20
+            new_height = max(1, int(20 / aspect))
+        else:  # Cao hơn rộng
+            new_height = 20
+            new_width = max(1, int(20 * aspect))
+        
+        digit_img = digit_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        # Tạo ảnh 28x28 với nền đen và đặt chữ số vào giữa
+        final_array = np.zeros((28, 28), dtype=np.float64)
+        
+        # Tính vị trí để căn giữa
+        y_offset = (28 - new_height) // 2
+        x_offset = (28 - new_width) // 2
+        
+        # Đặt chữ số vào giữa
+        final_array[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = np.array(digit_img)
+        
+        img_array = final_array
+    else:
+        # Nếu không tìm thấy chữ, resize đơn giản
+        img = Image.fromarray(img_array.astype(np.uint8))
+        img = img.resize((28, 28), Image.Resampling.LANCZOS)
+        img_array = np.array(img, dtype=np.float64)
+    
+    # Chuẩn hóa về [0, 1] - QUAN TRỌNG: giống với cách train
     img_array = img_array / 255.0
     
-    # Flatten
+    # Flatten thành vector 784 chiều
     img_flat = img_array.reshape(1, -1)
     
     return img_flat, img_array

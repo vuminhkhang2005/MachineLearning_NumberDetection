@@ -53,13 +53,13 @@ class Config:
     # Dữ liệu
     TEST_SIZE = 10000
     RANDOM_STATE = 42
-    USE_SUBSET = True  # Sử dụng tập con để huấn luyện nhanh
-    SUBSET_SIZE = 10000  # Số mẫu train
+    USE_SUBSET = False  # Sử dụng toàn bộ dữ liệu train để đạt accuracy cao nhất
+    SUBSET_SIZE = 60000  # Số mẫu train (60000 = full MNIST train)
     
-    # SVM
+    # SVM - Tham số tối ưu cho MNIST
     DEFAULT_KERNEL = 'rbf'
-    DEFAULT_C = 1.0
-    DEFAULT_GAMMA = 'scale'
+    DEFAULT_C = 10.0  # Tối ưu cho MNIST (thay vì 1.0)
+    DEFAULT_GAMMA = 0.01  # Tối ưu cho MNIST (thay vì 'scale')
     
     # GridSearch
     GRID_SEARCH_SAMPLES = 5000
@@ -145,9 +145,18 @@ def split_data(X, y, config):
     return X_train, X_test, y_train, y_test
 
 
-def create_pipeline(kernel='rbf', C=1.0, gamma='scale', use_pca=False, n_components=100):
-    """Tạo pipeline cho SVM."""
-    steps = [('scaler', StandardScaler())]
+def create_pipeline(kernel='rbf', C=10.0, gamma=0.01, use_pca=False, n_components=100):
+    """
+    Tạo pipeline cho SVM.
+    
+    LƯU Ý QUAN TRỌNG: KHÔNG dùng StandardScaler trong pipeline.
+    Dữ liệu đã được chuẩn hóa về [0, 1] bằng cách chia cho 255.
+    Điều này giúp đảm bảo tính nhất quán khi dự đoán ảnh mới.
+    """
+    steps = []
+    
+    # KHÔNG dùng StandardScaler - sử dụng chuẩn hóa 0-1 đơn giản thay thế
+    # Điều này tránh vấn đề không khớp khi dự đoán ảnh mới
     
     if use_pca:
         steps.append(('pca', PCA(n_components=n_components)))
@@ -157,13 +166,18 @@ def create_pipeline(kernel='rbf', C=1.0, gamma='scale', use_pca=False, n_compone
         C=C,
         gamma=gamma,
         probability=True,
-        cache_size=1000
+        cache_size=2000,
+        random_state=42
     )))
+    
+    # Nếu không dùng PCA, trả về SVC trực tiếp
+    if len(steps) == 1:
+        return steps[0][1]
     
     return Pipeline(steps)
 
 
-def train_svm(X_train, y_train, kernel='rbf', C=1.0, gamma='scale',
+def train_svm(X_train, y_train, kernel='rbf', C=10.0, gamma=0.01,
               use_pca=False, n_components=100):
     """Huấn luyện mô hình SVM."""
     print(f"\n🏋️ Bắt đầu huấn luyện SVM...")
@@ -171,16 +185,23 @@ def train_svm(X_train, y_train, kernel='rbf', C=1.0, gamma='scale',
     print(f"   - C: {C}")
     print(f"   - Gamma: {gamma}")
     print(f"   - PCA: {use_pca} ({n_components} components)" if use_pca else f"   - PCA: {use_pca}")
+    print(f"   - Số mẫu train: {len(X_train)}")
     
-    pipeline = create_pipeline(kernel, C, gamma, use_pca, n_components)
+    model = create_pipeline(kernel, C, gamma, use_pca, n_components)
     
     start_time = time()
-    pipeline.fit(X_train, y_train)
+    model.fit(X_train, y_train)
     train_time = time() - start_time
     
     print(f"\n✅ Huấn luyện hoàn tất trong {train_time:.2f} giây")
     
-    return pipeline, train_time
+    # Hiển thị số support vectors nếu có
+    if hasattr(model, 'n_support_'):
+        print(f"   - Số support vectors: {sum(model.n_support_)}")
+    elif hasattr(model, 'named_steps') and hasattr(model.named_steps['svc'], 'n_support_'):
+        print(f"   - Số support vectors: {sum(model.named_steps['svc'].n_support_)}")
+    
+    return model, train_time
 
 
 def evaluate_model(model, X_test, y_test, model_name="Model"):
@@ -220,12 +241,14 @@ def run_grid_search(X_train, y_train, config):
     print("\n🔍 Bắt đầu Grid Search...")
     print("⚠️ Quá trình này có thể mất vài phút...\n")
     
-    pipeline = create_pipeline()
+    # Sử dụng SVC trực tiếp thay vì pipeline (không dùng StandardScaler)
+    svc = SVC(probability=True, cache_size=2000, random_state=42)
     
+    # Lưới tham số tối ưu cho MNIST
     param_grid = {
-        'svc__C': [0.1, 1, 10],
-        'svc__gamma': ['scale', 0.01, 0.1],
-        'svc__kernel': ['rbf', 'linear']
+        'C': [1, 5, 10],
+        'gamma': [0.01, 0.02, 0.05],
+        'kernel': ['rbf']
     }
     
     # Sử dụng tập con cho GridSearch
@@ -236,7 +259,7 @@ def run_grid_search(X_train, y_train, config):
     print(f"📊 Sử dụng {n_samples} mẫu cho GridSearch")
     
     grid_search = GridSearchCV(
-        pipeline,
+        svc,
         param_grid,
         cv=config.GRID_CV,
         n_jobs=-1,
@@ -254,7 +277,14 @@ def run_grid_search(X_train, y_train, config):
     print(f"   - Best Score (CV): {grid_search.best_score_:.4f}")
     print(f"   - Best Parameters: {grid_search.best_params_}")
     
-    return grid_search.best_params_
+    # Chuyển đổi key để tương thích với code cũ
+    best_params = {
+        'svc__kernel': grid_search.best_params_['kernel'],
+        'svc__C': grid_search.best_params_['C'],
+        'svc__gamma': grid_search.best_params_['gamma']
+    }
+    
+    return best_params
 
 
 def plot_confusion_matrix(cm, output_path):

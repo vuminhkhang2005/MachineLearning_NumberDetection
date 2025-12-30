@@ -70,13 +70,26 @@ python svm_digit_recognition.py --use-pca --pca-components 100
 
 | Tham số | Mô tả | Mặc định |
 |---------|-------|----------|
-| `--subset-size` | Số mẫu train để sử dụng | 10000 |
-| `--use-full-data` | Sử dụng toàn bộ dữ liệu train | False |
+| `--subset-size` | Số mẫu train để sử dụng | 60000 |
+| `--use-full-data` | Sử dụng toàn bộ dữ liệu train | True |
 | `--skip-grid-search` | Bỏ qua Grid Search | False |
 | `--kernel` | Loại kernel (rbf, linear, poly, sigmoid) | rbf |
-| `--C` | Hệ số regularization | 1.0 |
+| `--C` | Hệ số regularization | 10.0 |
 | `--use-pca` | Sử dụng PCA giảm chiều | False |
 | `--pca-components` | Số thành phần PCA | 100 |
+
+### Script train mới (khuyến nghị)
+
+```bash
+# Train với full data và tham số tối ưu
+python train_svm_model.py --samples 60000
+
+# Train nhanh để test (5000 mẫu)
+python train_svm_model.py --quick
+
+# Train với tham số tùy chỉnh
+python train_svm_model.py --samples 30000 --C 10.0 --gamma 0.01
+```
 
 ## 🧪 Test Model
 
@@ -126,28 +139,34 @@ python test_model_cli.py --no-plot
 ├── README.md                      # Tài liệu hướng dẫn
 ├── requirements.txt               # Dependencies
 ├── svm_digit_recognition.ipynb    # Jupyter Notebook (Google Colab)
-├── svm_digit_recognition.py       # Python script huấn luyện
-├── test_app.py                    # 🆕 Ứng dụng web test (Gradio)
-├── test_model_cli.py              # 🆕 CLI test model
+├── svm_digit_recognition.py       # Python script huấn luyện (cũ)
+├── train_svm_model.py             # 🆕 Script train model cải tiến (KHUYẾN NGHỊ)
+├── test_app.py                    # Ứng dụng web test (Gradio)
+├── test_model_cli.py              # CLI test model
+├── svm_digit_classifier.joblib    # Mô hình đã train (copy ở root)
 └── outputs/                       # Thư mục đầu ra (tự động tạo)
-    ├── svm_digit_classifier.joblib      # Mô hình đã train
-    ├── svm_predictions_for_ensemble.csv # Predictions cho ensemble
-    ├── svm_probabilities.npy            # Xác suất (numpy array)
-    ├── svm_predictions.npy              # Nhãn dự đoán
-    └── confusion_matrix.png             # Ma trận nhầm lẫn
+    └── svm_digit_classifier.joblib      # Mô hình đã train (98.30% accuracy)
 ```
 
 ## 📊 Kết quả
 
-### Hiệu suất mô hình (với 10,000 mẫu train)
+### Hiệu suất mô hình
 
-| Model | Accuracy | Train Time |
-|-------|----------|------------|
-| SVM RBF | ~97-98% | ~30-60s |
-| SVM Linear | ~94-96% | ~20-40s |
-| SVM RBF + PCA(100) | ~96-97% | ~15-30s |
+| Số mẫu train | Accuracy | Train Time | Support Vectors |
+|--------------|----------|------------|-----------------|
+| 60,000 (full) | **98.30%** | ~6 phút | ~10,700 |
+| 30,000 | 97.76% | ~2.5 phút | ~6,900 |
+| 10,000 | ~96-97% | ~30s | ~3,000 |
 
-*Lưu ý: Kết quả có thể thay đổi tùy thuộc vào phần cứng và tham số*
+### Cấu hình tối ưu cho MNIST
+
+| Tham số | Giá trị tối ưu |
+|---------|----------------|
+| Kernel | RBF |
+| C | 10.0 |
+| Gamma | 0.01 |
+
+*Lưu ý: Kết quả có thể thay đổi nhẹ tùy thuộc vào phần cứng*
 
 ## 🔧 API Reference
 
@@ -215,8 +234,10 @@ print(f"Predictions shape: {predictions.shape}")      # (n_samples,)
 
 ### 2. Huấn luyện mô hình SVM
 
-- Sử dụng Pipeline với StandardScaler + SVC
-- Kernel mặc định: RBF
+- Sử dụng SVC với RBF kernel
+- **KHÔNG** dùng StandardScaler để tránh vấn đề không khớp khi dự đoán ảnh mới
+- Chuẩn hóa đơn giản: chia 255 để đưa về [0, 1]
+- Tham số tối ưu: C=10.0, gamma=0.01
 - Hỗ trợ probability output
 
 ### 3. Đánh giá mô hình

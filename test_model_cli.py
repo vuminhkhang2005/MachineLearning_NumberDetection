@@ -46,23 +46,29 @@ def train_new_model():
     """Huấn luyện model mới nếu chưa có."""
     from sklearn.datasets import fetch_openml
     from sklearn.model_selection import train_test_split
-    from sklearn.preprocessing import StandardScaler
     from sklearn.svm import SVC
-    from sklearn.pipeline import Pipeline
     
     print("📥 Đang tải dữ liệu MNIST...")
     X, y = fetch_openml('mnist_784', version=1, return_X_y=True, as_frame=False, parser='auto')
     y = y.astype(int)
-    X = X.astype(np.float32) / 255.0
+    # Chuẩn hóa đơn giản về [0, 1] - KHÔNG dùng StandardScaler
+    X = X.astype(np.float64) / 255.0
     
-    # Sử dụng tập con để train nhanh
-    X_train, _, y_train, _ = train_test_split(X, y, train_size=10000, random_state=42, stratify=y)
+    # Sử dụng 30000 mẫu để train (cân bằng giữa tốc độ và độ chính xác)
+    X_train, _, y_train, _ = train_test_split(X, y, train_size=30000, random_state=42, stratify=y)
     
     print("🏋️ Đang huấn luyện model SVM...")
-    model = Pipeline([
-        ('scaler', StandardScaler()),
-        ('svc', SVC(kernel='rbf', C=1.0, gamma='scale', probability=True, cache_size=1000))
-    ])
+    print("   (Quá trình này có thể mất vài phút...)")
+    
+    # KHÔNG dùng Pipeline với StandardScaler - tránh vấn đề không khớp khi dự đoán
+    model = SVC(
+        kernel='rbf', 
+        C=10.0,  # Tối ưu cho MNIST
+        gamma=0.01,  # Tối ưu cho MNIST
+        probability=True, 
+        cache_size=2000,
+        random_state=42
+    )
     model.fit(X_train, y_train)
     
     # Lưu model
@@ -74,23 +80,65 @@ def train_new_model():
 
 
 def load_and_preprocess_image(image_path):
-    """Tải và tiền xử lý ảnh từ file."""
+    """
+    Tải và tiền xử lý ảnh từ file để phù hợp với MNIST.
+    
+    QUAN TRỌNG: MNIST có các đặc điểm sau:
+    - Kích thước 28x28 pixels
+    - Nền đen (0), chữ trắng (255)
+    - Chữ số được căn giữa với bounding box
+    - Giá trị pixel đã chuẩn hóa về [0, 1]
+    """
     from PIL import Image
     
-    # Đọc ảnh
+    # Đọc ảnh và chuyển sang grayscale
     img = Image.open(image_path).convert('L')
+    img_array = np.array(img, dtype=np.float64)
     
-    # Resize về 28x28
-    img = img.resize((28, 28), Image.Resampling.LANCZOS)
-    
-    # Chuyển sang numpy array
-    img_array = np.array(img, dtype=np.float32)
-    
-    # Đảo ngược màu nếu cần (MNIST có nền đen, chữ trắng)
+    # Đảo ngược màu nếu nền sáng (MNIST có nền đen)
     if img_array.mean() > 127:
         img_array = 255 - img_array
     
-    # Chuẩn hóa
+    # Tìm bounding box của chữ số và căn giữa (giống MNIST)
+    threshold = 20
+    coords = np.where(img_array > threshold)
+    
+    if len(coords[0]) > 0 and len(coords[1]) > 0:
+        y_min, y_max = coords[0].min(), coords[0].max()
+        x_min, x_max = coords[1].min(), coords[1].max()
+        
+        # Cắt vùng chứa chữ số
+        digit_region = img_array[y_min:y_max+1, x_min:x_max+1]
+        
+        # Resize digit region về 20x20 (MNIST để margin 4 pixel mỗi bên)
+        digit_img = Image.fromarray(digit_region.astype(np.uint8))
+        
+        # Giữ tỷ lệ khung hình
+        aspect = digit_region.shape[1] / digit_region.shape[0]
+        if aspect > 1:
+            new_width = 20
+            new_height = max(1, int(20 / aspect))
+        else:
+            new_height = 20
+            new_width = max(1, int(20 * aspect))
+        
+        digit_img = digit_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        # Tạo ảnh 28x28 với nền đen và đặt chữ số vào giữa
+        final_array = np.zeros((28, 28), dtype=np.float64)
+        
+        y_offset = (28 - new_height) // 2
+        x_offset = (28 - new_width) // 2
+        
+        final_array[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = np.array(digit_img)
+        
+        img_array = final_array
+    else:
+        img = Image.fromarray(img_array.astype(np.uint8))
+        img = img.resize((28, 28), Image.Resampling.LANCZOS)
+        img_array = np.array(img, dtype=np.float64)
+    
+    # Chuẩn hóa về [0, 1] - giống với cách train
     img_array = img_array / 255.0
     
     return img_array
