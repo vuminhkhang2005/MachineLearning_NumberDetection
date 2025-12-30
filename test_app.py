@@ -88,6 +88,9 @@ class DigitRecognitionApp:
         self.canvas_size = 280
         self.brush_size = 20
         
+        # Số lần làm dày nét (dilation) - quan trọng cho nét bút mỏng
+        self.dilate_iterations = tk.IntVar(value=2)
+        
         # Image để vẽ (nền đen)
         self.image = Image.new('L', (self.canvas_size, self.canvas_size), color=0)
         self.draw = ImageDraw.Draw(self.image)
@@ -161,6 +164,28 @@ class DigitRecognitionApp:
         test_btn = ttk.Button(btn_frame2, text="🎲 Test MNIST", 
                               command=self.test_mnist_sample, style='Secondary.TButton')
         test_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+        
+        # Slider để điều chỉnh độ dày nét (dilation) - quan trọng cho nét bút mỏng
+        dilate_frame = ttk.LabelFrame(left_frame, text="✏️ Độ dày nét (cho ảnh upload)", padding="5")
+        dilate_frame.pack(pady=5, fill=tk.X)
+        
+        dilate_label = ttk.Label(dilate_frame, 
+                                 text="Tăng nếu nét bút mỏng trên giấy trắng:")
+        dilate_label.pack()
+        
+        dilate_slider = ttk.Scale(dilate_frame, from_=0, to=5, 
+                                  variable=self.dilate_iterations, 
+                                  orient=tk.HORIZONTAL)
+        dilate_slider.pack(fill=tk.X, padx=5)
+        
+        self.dilate_value_label = ttk.Label(dilate_frame, text="Mức: 2")
+        self.dilate_value_label.pack()
+        
+        def update_dilate_label(*args):
+            val = self.dilate_iterations.get()
+            self.dilate_value_label.config(text=f"Mức: {val}")
+        
+        self.dilate_iterations.trace_add("write", update_dilate_label)
         
         # Right frame - Kết quả
         right_frame = ttk.LabelFrame(content_frame, text="📊 Kết quả", padding="10")
@@ -431,8 +456,11 @@ class DigitRecognitionApp:
             self.result_label.config(text=f"Đang xử lý: {os.path.basename(file_path)}...")
             self.root.update()
             
-            # Đọc và tiền xử lý ảnh
-            processed = self.load_and_preprocess_uploaded_image(file_path)
+            # Đọc và tiền xử lý ảnh (sử dụng dilate_iterations từ slider)
+            processed = self.load_and_preprocess_uploaded_image(
+                file_path, 
+                dilate_iterations=self.dilate_iterations.get()
+            )
             
             # Chuẩn hóa và flatten
             img_flat = (processed / 255.0).reshape(1, -1)
@@ -485,7 +513,7 @@ class DigitRecognitionApp:
         except Exception as e:
             messagebox.showerror("Lỗi", f"Không thể xử lý ảnh: {str(e)}")
     
-    def load_and_preprocess_uploaded_image(self, image_path):
+    def load_and_preprocess_uploaded_image(self, image_path, dilate_iterations=2):
         """
         Tải và tiền xử lý ảnh từ file để phù hợp với MNIST.
         
@@ -493,31 +521,94 @@ class DigitRecognitionApp:
         - Kích thước 28x28 pixels
         - Nền đen (0), chữ trắng (255)
         - Chữ số được căn giữa với bounding box
+        - NÉT CHỮ TƯƠNG ĐỐI DÀY (2-4 pixels)
+        
+        Parameters:
+        -----------
+        image_path : str
+            Đường dẫn đến file ảnh
+        dilate_iterations : int
+            Số lần làm dày nét chữ (mặc định 2, tăng nếu nét quá mỏng)
         """
+        from PIL import ImageFilter, ImageOps
+        
         # Đọc ảnh và chuyển sang grayscale
         img = Image.open(image_path).convert('L')
         img_array = np.array(img, dtype=np.float64)
         
-        # Đảo ngược màu nếu nền sáng (MNIST có nền đen)
-        if img_array.mean() > 127:
+        # =====================================================================
+        # BƯỚC 1: TĂNG CƯỜNG ĐỘ TƯƠNG PHẢN
+        # Rất quan trọng cho nét bút mỏng trên giấy trắng
+        # =====================================================================
+        img_pil = Image.fromarray(img_array.astype(np.uint8))
+        img_pil = ImageOps.autocontrast(img_pil, cutoff=2)
+        img_array = np.array(img_pil, dtype=np.float64)
+        
+        # =====================================================================
+        # BƯỚC 2: ĐẢO NGƯỢC MÀU NẾU NỀN SÁNG (MNIST CÓ NỀN ĐEN)
+        # =====================================================================
+        # Kiểm tra nền: lấy giá trị ở các góc và cạnh
+        corners = [
+            img_array[0, 0], img_array[0, -1], 
+            img_array[-1, 0], img_array[-1, -1],
+            img_array[0, img_array.shape[1]//2],
+            img_array[-1, img_array.shape[1]//2],
+            img_array[img_array.shape[0]//2, 0],
+            img_array[img_array.shape[0]//2, -1]
+        ]
+        background_value = np.median(corners)
+        
+        # Đảo màu nếu nền sáng (viết trên giấy trắng)
+        if background_value > 127:
             img_array = 255 - img_array
         
-        # Tìm bounding box của chữ số và căn giữa (giống MNIST)
-        threshold = 20
+        # =====================================================================
+        # BƯỚC 3: LÀM DÀY NÉT CHỮ (MORPHOLOGICAL DILATION)
+        # Rất quan trọng cho nét bút mỏng!
+        # =====================================================================
+        if dilate_iterations > 0:
+            img_pil = Image.fromarray(img_array.astype(np.uint8))
+            for _ in range(dilate_iterations):
+                img_pil = img_pil.filter(ImageFilter.MaxFilter(size=3))
+            img_array = np.array(img_pil, dtype=np.float64)
+        
+        # =====================================================================
+        # BƯỚC 4: NHẬN DIỆN NGƯỠNG VÀ LỌC NHIỄU
+        # =====================================================================
+        if img_array.max() > 0:
+            non_zero_pixels = img_array[img_array > 10]
+            if len(non_zero_pixels) > 0:
+                threshold = max(30, np.percentile(non_zero_pixels, 30))
+            else:
+                threshold = 30
+        else:
+            threshold = 30
+        
+        # =====================================================================
+        # BƯỚC 5: TÌM BOUNDING BOX VÀ CĂN GIỮA
+        # =====================================================================
         coords = np.where(img_array > threshold)
         
         if len(coords[0]) > 0 and len(coords[1]) > 0:
             y_min, y_max = coords[0].min(), coords[0].max()
             x_min, x_max = coords[1].min(), coords[1].max()
             
+            # Thêm padding nhỏ
+            padding = 5
+            y_min = max(0, y_min - padding)
+            y_max = min(img_array.shape[0] - 1, y_max + padding)
+            x_min = max(0, x_min - padding)
+            x_max = min(img_array.shape[1] - 1, x_max + padding)
+            
             # Cắt vùng chứa chữ số
             digit_region = img_array[y_min:y_max+1, x_min:x_max+1]
             
-            # Resize digit region về 20x20 (MNIST để margin 4 pixel mỗi bên)
+            # Resize về 20x20 (MNIST để margin 4 pixel mỗi bên)
             digit_img = Image.fromarray(digit_region.astype(np.uint8))
             
             # Giữ tỷ lệ khung hình
-            aspect = digit_region.shape[1] / digit_region.shape[0]
+            h, w = digit_region.shape
+            aspect = w / h
             if aspect > 1:
                 new_width = 20
                 new_height = max(1, int(20 / aspect))
@@ -533,7 +624,8 @@ class DigitRecognitionApp:
             y_offset = (28 - new_height) // 2
             x_offset = (28 - new_width) // 2
             
-            final_array[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = np.array(digit_img)
+            resized_digit = np.array(digit_img, dtype=np.float64)
+            final_array[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = resized_digit
             
             return final_array
         else:

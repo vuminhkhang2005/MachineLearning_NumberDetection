@@ -79,7 +79,7 @@ def train_new_model():
     return model
 
 
-def load_and_preprocess_image(image_path):
+def load_and_preprocess_image(image_path, dilate_iterations=2, debug=False):
     """
     Tải và tiền xử lý ảnh từ file để phù hợp với MNIST.
     
@@ -88,33 +88,136 @@ def load_and_preprocess_image(image_path):
     - Nền đen (0), chữ trắng (255)
     - Chữ số được căn giữa với bounding box
     - Giá trị pixel đã chuẩn hóa về [0, 1]
+    - NÉT CHỮ TƯƠNG ĐỐI DÀY (2-4 pixels)
+    
+    Parameters:
+    -----------
+    image_path : str
+        Đường dẫn đến file ảnh
+    dilate_iterations : int
+        Số lần làm dày nét chữ (mặc định 2, tăng nếu nét quá mỏng)
+    debug : bool
+        Hiển thị ảnh trung gian để debug
+        
+    Returns:
+    --------
+    np.ndarray : Ảnh 28x28 đã xử lý, chuẩn hóa về [0, 1]
     """
-    from PIL import Image
+    from PIL import Image, ImageFilter, ImageOps
     
     # Đọc ảnh và chuyển sang grayscale
     img = Image.open(image_path).convert('L')
     img_array = np.array(img, dtype=np.float64)
     
-    # Đảo ngược màu nếu nền sáng (MNIST có nền đen)
-    if img_array.mean() > 127:
-        img_array = 255 - img_array
+    if debug:
+        print(f"📷 Kích thước ảnh gốc: {img_array.shape}")
+        print(f"📊 Min/Max pixel: {img_array.min():.0f}/{img_array.max():.0f}")
+        print(f"📊 Mean pixel: {img_array.mean():.1f}")
     
-    # Tìm bounding box của chữ số và căn giữa (giống MNIST)
-    threshold = 20
+    # =====================================================================
+    # BƯỚC 1: TĂNG CƯỜNG ĐỘ TƯƠNG PHẢN
+    # Rất quan trọng cho nét bút mỏng trên giấy trắng
+    # =====================================================================
+    
+    # Tự động điều chỉnh contrast
+    img_pil = Image.fromarray(img_array.astype(np.uint8))
+    img_pil = ImageOps.autocontrast(img_pil, cutoff=2)
+    img_array = np.array(img_pil, dtype=np.float64)
+    
+    if debug:
+        print(f"📊 Sau autocontrast - Min/Max: {img_array.min():.0f}/{img_array.max():.0f}")
+    
+    # =====================================================================
+    # BƯỚC 2: ĐẢO NGƯỢC MÀU NẾU NỀN SÁNG (MNIST CÓ NỀN ĐEN)
+    # =====================================================================
+    
+    # Kiểm tra nền: lấy giá trị ở các góc và cạnh
+    corners = [
+        img_array[0, 0], img_array[0, -1], 
+        img_array[-1, 0], img_array[-1, -1],
+        img_array[0, img_array.shape[1]//2],
+        img_array[-1, img_array.shape[1]//2],
+        img_array[img_array.shape[0]//2, 0],
+        img_array[img_array.shape[0]//2, -1]
+    ]
+    background_value = np.median(corners)
+    
+    if debug:
+        print(f"📊 Giá trị nền (median góc): {background_value:.0f}")
+    
+    # Đảo màu nếu nền sáng (viết trên giấy trắng)
+    if background_value > 127:
+        img_array = 255 - img_array
+        if debug:
+            print("🔄 Đã đảo ngược màu (nền sáng -> nền đen)")
+    
+    # =====================================================================
+    # BƯỚC 3: LÀM DÀY NÉT CHỮ (MORPHOLOGICAL DILATION)
+    # Rất quan trọng cho nét bút mỏng!
+    # =====================================================================
+    
+    if dilate_iterations > 0:
+        # Chuyển sang PIL để dùng filter
+        img_pil = Image.fromarray(img_array.astype(np.uint8))
+        
+        # Dùng MaxFilter để làm dày nét (tương tự dilation)
+        for _ in range(dilate_iterations):
+            img_pil = img_pil.filter(ImageFilter.MaxFilter(size=3))
+        
+        img_array = np.array(img_pil, dtype=np.float64)
+        
+        if debug:
+            print(f"✏️ Đã làm dày nét {dilate_iterations} lần")
+    
+    # =====================================================================
+    # BƯỚC 4: NHẬN DIỆN NGƯỠNG VÀ LỌC NHIỄU
+    # =====================================================================
+    
+    # Tính ngưỡng động dựa trên histogram (Otsu-like)
+    # Chỉ giữ lại các pixel có giá trị đủ cao
+    if img_array.max() > 0:
+        # Tìm ngưỡng: lấy percentile 90 của các pixel > 0
+        non_zero_pixels = img_array[img_array > 10]
+        if len(non_zero_pixels) > 0:
+            threshold = max(30, np.percentile(non_zero_pixels, 30))
+        else:
+            threshold = 30
+    else:
+        threshold = 30
+    
+    if debug:
+        print(f"📊 Ngưỡng động: {threshold:.0f}")
+    
+    # =====================================================================
+    # BƯỚC 5: TÌM BOUNDING BOX VÀ CĂN GIỮA
+    # =====================================================================
+    
     coords = np.where(img_array > threshold)
     
     if len(coords[0]) > 0 and len(coords[1]) > 0:
         y_min, y_max = coords[0].min(), coords[0].max()
         x_min, x_max = coords[1].min(), coords[1].max()
         
+        # Thêm padding nhỏ
+        padding = 5
+        y_min = max(0, y_min - padding)
+        y_max = min(img_array.shape[0] - 1, y_max + padding)
+        x_min = max(0, x_min - padding)
+        x_max = min(img_array.shape[1] - 1, x_max + padding)
+        
         # Cắt vùng chứa chữ số
         digit_region = img_array[y_min:y_max+1, x_min:x_max+1]
         
-        # Resize digit region về 20x20 (MNIST để margin 4 pixel mỗi bên)
+        if debug:
+            print(f"📦 Bounding box: ({x_min}, {y_min}) -> ({x_max}, {y_max})")
+            print(f"📦 Kích thước vùng chữ số: {digit_region.shape}")
+        
+        # Resize về 20x20 (MNIST để margin 4 pixel mỗi bên)
         digit_img = Image.fromarray(digit_region.astype(np.uint8))
         
         # Giữ tỷ lệ khung hình
-        aspect = digit_region.shape[1] / digit_region.shape[0]
+        h, w = digit_region.shape
+        aspect = w / h
         if aspect > 1:
             new_width = 20
             new_height = max(1, int(20 / aspect))
@@ -122,6 +225,7 @@ def load_and_preprocess_image(image_path):
             new_height = 20
             new_width = max(1, int(20 * aspect))
         
+        # Dùng LANCZOS cho chất lượng tốt
         digit_img = digit_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
         
         # Tạo ảnh 28x28 với nền đen và đặt chữ số vào giữa
@@ -130,21 +234,35 @@ def load_and_preprocess_image(image_path):
         y_offset = (28 - new_height) // 2
         x_offset = (28 - new_width) // 2
         
-        final_array[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = np.array(digit_img)
+        resized_digit = np.array(digit_img, dtype=np.float64)
+        final_array[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = resized_digit
         
         img_array = final_array
     else:
+        if debug:
+            print("⚠️ Không tìm thấy chữ số, resize toàn bộ ảnh")
         img = Image.fromarray(img_array.astype(np.uint8))
         img = img.resize((28, 28), Image.Resampling.LANCZOS)
         img_array = np.array(img, dtype=np.float64)
     
-    # Chuẩn hóa về [0, 1] - giống với cách train
-    img_array = img_array / 255.0
+    # =====================================================================
+    # BƯỚC 6: CHUẨN HÓA VỀ [0, 1]
+    # =====================================================================
+    
+    # Normalize về [0, 1]
+    if img_array.max() > 0:
+        img_array = img_array / 255.0
+    
+    # Clip để đảm bảo trong khoảng [0, 1]
+    img_array = np.clip(img_array, 0, 1)
+    
+    if debug:
+        print(f"✅ Ảnh cuối cùng: {img_array.shape}, range [{img_array.min():.3f}, {img_array.max():.3f}]")
     
     return img_array
 
 
-def predict_single(model, image, true_label=None, show_plot=True):
+def predict_single(model, image, true_label=None, show_plot=True, original_image=None):
     """Dự đoán một ảnh và hiển thị kết quả."""
     # Flatten
     img_flat = image.reshape(1, -1)
@@ -173,24 +291,50 @@ def predict_single(model, image, true_label=None, show_plot=True):
     
     # Hiển thị plot
     if show_plot:
-        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-        
-        # Ảnh
-        axes[0].imshow(image.reshape(28, 28), cmap='gray')
-        title = f'Dự đoán: {prediction}'
-        if true_label is not None:
-            title += f' (Thực tế: {true_label})'
-        axes[0].set_title(title)
-        axes[0].axis('off')
-        
-        # Biểu đồ xác suất
-        colors = ['#e74c3c' if i == prediction else '#3498db' for i in range(10)]
-        axes[1].bar(range(10), probabilities, color=colors)
-        axes[1].set_xlabel('Chữ số')
-        axes[1].set_ylabel('Xác suất')
-        axes[1].set_title('Phân bố xác suất')
-        axes[1].set_xticks(range(10))
-        axes[1].set_ylim([0, 1])
+        # Nếu có ảnh gốc, hiển thị 3 panel
+        if original_image is not None:
+            fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+            
+            # Ảnh gốc
+            axes[0].imshow(original_image, cmap='gray')
+            axes[0].set_title('Ảnh gốc')
+            axes[0].axis('off')
+            
+            # Ảnh đã xử lý
+            axes[1].imshow(image.reshape(28, 28), cmap='gray')
+            title = f'Sau xử lý → Dự đoán: {prediction}'
+            if true_label is not None:
+                title += f' (Thực tế: {true_label})'
+            axes[1].set_title(title)
+            axes[1].axis('off')
+            
+            # Biểu đồ xác suất
+            colors = ['#e74c3c' if i == prediction else '#3498db' for i in range(10)]
+            axes[2].bar(range(10), probabilities, color=colors)
+            axes[2].set_xlabel('Chữ số')
+            axes[2].set_ylabel('Xác suất')
+            axes[2].set_title('Phân bố xác suất')
+            axes[2].set_xticks(range(10))
+            axes[2].set_ylim([0, 1])
+        else:
+            fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+            
+            # Ảnh
+            axes[0].imshow(image.reshape(28, 28), cmap='gray')
+            title = f'Dự đoán: {prediction}'
+            if true_label is not None:
+                title += f' (Thực tế: {true_label})'
+            axes[0].set_title(title)
+            axes[0].axis('off')
+            
+            # Biểu đồ xác suất
+            colors = ['#e74c3c' if i == prediction else '#3498db' for i in range(10)]
+            axes[1].bar(range(10), probabilities, color=colors)
+            axes[1].set_xlabel('Chữ số')
+            axes[1].set_ylabel('Xác suất')
+            axes[1].set_title('Phân bố xác suất')
+            axes[1].set_xticks(range(10))
+            axes[1].set_ylim([0, 1])
         
         plt.tight_layout()
         plt.show()
@@ -317,11 +461,29 @@ def evaluate_model(model):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Test Model Nhận dạng Chữ số')
+    parser = argparse.ArgumentParser(
+        description='Test Model Nhận dạng Chữ số',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Ví dụ sử dụng:
+  # Test với ảnh viết tay (nét bút mỏng)
+  python test_model_cli.py --image my_digit.png --dilate 3
+  
+  # Debug xem quá trình xử lý ảnh
+  python test_model_cli.py --image my_digit.png --debug
+  
+  # Test với MNIST
+  python test_model_cli.py --samples 10
+        """
+    )
     parser.add_argument('--image', type=str, help='Đường dẫn đến file ảnh để test')
     parser.add_argument('--samples', type=int, default=5, help='Số mẫu MNIST ngẫu nhiên để test (default: 5)')
     parser.add_argument('--evaluate', action='store_true', help='Đánh giá model trên toàn bộ test set')
     parser.add_argument('--no-plot', action='store_true', help='Không hiển thị đồ thị')
+    parser.add_argument('--dilate', type=int, default=2, 
+                        help='Số lần làm dày nét chữ (default: 2). Tăng lên 3-4 nếu nét bút rất mỏng')
+    parser.add_argument('--debug', action='store_true', 
+                        help='Hiển thị thông tin debug về quá trình xử lý ảnh')
     
     args = parser.parse_args()
     
@@ -340,8 +502,26 @@ def main():
             return
         
         print(f"\n📂 Đang tải ảnh: {args.image}")
-        image = load_and_preprocess_image(args.image)
-        predict_single(model, image, show_plot=not args.no_plot)
+        
+        # Đọc ảnh gốc để hiển thị so sánh
+        from PIL import Image
+        original_img = Image.open(args.image).convert('L')
+        original_array = np.array(original_img)
+        
+        # Tiền xử lý với các tham số
+        image = load_and_preprocess_image(
+            args.image, 
+            dilate_iterations=args.dilate, 
+            debug=args.debug
+        )
+        
+        # Dự đoán
+        predict_single(model, image, show_plot=not args.no_plot, original_image=original_array)
+        
+        # Gợi ý nếu cần
+        print(f"\n💡 Gợi ý:")
+        print(f"   - Nếu kết quả sai, thử tăng --dilate (ví dụ: --dilate 3 hoặc --dilate 4)")
+        print(f"   - Dùng --debug để xem quá trình xử lý ảnh")
         
     elif args.evaluate:
         # Đánh giá trên test set
