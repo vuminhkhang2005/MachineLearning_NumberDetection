@@ -76,85 +76,188 @@ def preprocess_digit_image(image_array, dilate_iterations=3, thin_stroke_mode=Tr
         print(f"📊 Min/Max pixel: {img_array.min():.0f}/{img_array.max():.0f}")
         print(f"🔧 Chế độ nét mỏng: {'BẬT' if thin_stroke_mode else 'TẮT'}")
     
-    # BƯỚC 1: TĂNG CƯỜNG ĐỘ TƯƠNG PHẢN
-    img_pil = Image.fromarray(img_array.astype(np.uint8))
-    cutoff = 1 if thin_stroke_mode else 2
-    img_pil = ImageOps.autocontrast(img_pil, cutoff=cutoff)
+    # =========================================================================
+    # BƯỚC 1: ĐẢO NGƯỢC MÀU NẾU NỀN SÁNG (MNIST CÓ NỀN ĐEN)
+    # Làm bước này ĐẦU TIÊN để các bước sau hoạt động đúng
+    # =========================================================================
+    h, w = img_array.shape
+    # Lấy mẫu từ viền và các góc
+    border_samples = []
+    # Hàng trên và dưới
+    border_samples.extend(img_array[0, :].tolist())
+    border_samples.extend(img_array[-1, :].tolist())
+    # Cột trái và phải
+    border_samples.extend(img_array[:, 0].tolist())
+    border_samples.extend(img_array[:, -1].tolist())
+    background_value = np.median(border_samples)
     
+    is_light_background = background_value > 127
+    if is_light_background:
+        img_array = 255 - img_array
+        if debug:
+            print(f"🔄 Đã đảo ngược màu (nền sáng {background_value:.0f} -> nền đen)")
+    
+    # =========================================================================
+    # BƯỚC 2: TĂNG CƯỜNG ĐỘ TƯƠNG PHẢN VỚI OTSU THRESHOLDING
+    # Phương pháp này tự động tìm ngưỡng tối ưu để tách nét từ nền
+    # =========================================================================
+    
+    # Tính Otsu threshold
+    def otsu_threshold(image):
+        """Tính ngưỡng Otsu để tách foreground/background."""
+        hist, _ = np.histogram(image.flatten(), bins=256, range=(0, 256))
+        total = image.size
+        
+        sum_total = np.sum(np.arange(256) * hist)
+        sum_bg, weight_bg = 0, 0
+        max_var, threshold = 0, 0
+        
+        for i in range(256):
+            weight_bg += hist[i]
+            if weight_bg == 0:
+                continue
+            weight_fg = total - weight_bg
+            if weight_fg == 0:
+                break
+            
+            sum_bg += i * hist[i]
+            mean_bg = sum_bg / weight_bg
+            mean_fg = (sum_total - sum_bg) / weight_fg
+            
+            var_between = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
+            if var_between > max_var:
+                max_var = var_between
+                threshold = i
+        
+        return threshold
+    
+    # Áp dụng Otsu
+    otsu_thresh = otsu_threshold(img_array)
+    
+    # Điều chỉnh ngưỡng cho nét mỏng (hạ thấp ngưỡng để bắt được nhiều nét hơn)
+    if thin_stroke_mode:
+        adjusted_thresh = max(10, otsu_thresh * 0.5)  # Hạ 50% cho nét mỏng
+    else:
+        adjusted_thresh = otsu_thresh * 0.7
+    
+    if debug:
+        print(f"📊 Otsu threshold: {otsu_thresh:.0f}, Adjusted: {adjusted_thresh:.0f}")
+    
+    # =========================================================================
+    # BƯỚC 3: TĂNG CONTRAST CHO NÉT
+    # =========================================================================
+    
+    # Tăng contrast: pixel > adjusted_thresh sẽ sáng lên
+    img_pil = Image.fromarray(img_array.astype(np.uint8))
+    
+    # AutoContrast mạnh
+    img_pil = ImageOps.autocontrast(img_pil, cutoff=0)
+    
+    # Tăng contrast thêm
     if contrast_factor > 1.0:
         enhancer = ImageEnhance.Contrast(img_pil)
         img_pil = enhancer.enhance(contrast_factor)
     
     img_array = np.array(img_pil, dtype=np.float64)
     
-    # BƯỚC 2: ĐẢO NGƯỢC MÀU NẾU NỀN SÁNG
-    h, w = img_array.shape
-    sample_points = [
-        img_array[0, 0], img_array[0, -1], 
-        img_array[-1, 0], img_array[-1, -1],
-        img_array[0, w//2], img_array[-1, w//2],
-        img_array[h//2, 0], img_array[h//2, -1]
-    ]
-    background_value = np.median(sample_points)
+    # =========================================================================
+    # BƯỚC 4: NHỊ PHÂN HÓA (BINARIZATION) - QUAN TRỌNG!
+    # Chuyển thành ảnh đen trắng rõ ràng để loại bỏ nhiễu
+    # Cần tìm ngưỡng GIỮA nhiễu nền và nét chữ
+    # =========================================================================
     
-    if background_value > 127:
-        img_array = 255 - img_array
-        if debug:
-            print("🔄 Đã đảo ngược màu (nền sáng -> nền đen)")
+    # Phân tích histogram để tìm ngưỡng tốt hơn
+    # Nhiễu nền thường ở vùng thấp (0-30), nét ở vùng cao (>50)
     
-    # BƯỚC 3: XỬ LÝ NHIỄU
-    if thin_stroke_mode:
-        noise_threshold = 15
-        img_array[img_array < noise_threshold] = 0
+    # Tính percentile để ước lượng
+    if img_array.max() > 0:
+        # Tìm các pixel có giá trị > 0 (có thể là nét hoặc nhiễu)
+        non_zero = img_array[img_array > 5]
+        if len(non_zero) > 100:
+            # Lấy percentile 80-90 để tìm mức của nét thật (nét thường ở vùng sáng nhất)
+            p10 = np.percentile(non_zero, 10)  # Nhiễu thấp
+            p50 = np.percentile(non_zero, 50)  # Trung bình
+            p90 = np.percentile(non_zero, 90)  # Nét chính
+            
+            # Ngưỡng nên ở giữa nhiễu (p10) và nét (p90)
+            # Dùng weighted average nghiêng về phía nhiễu để giữ được nét mỏng
+            binary_thresh = p10 + (p90 - p10) * 0.3
+            binary_thresh = max(25, min(100, binary_thresh))  # Giới hạn trong khoảng hợp lý
+            
+            if debug:
+                print(f"📊 Histogram: p10={p10:.0f}, p50={p50:.0f}, p90={p90:.0f}")
+        else:
+            binary_thresh = otsu_thresh * 0.5
+    else:
+        binary_thresh = 30
     
-    # BƯỚC 4: LÀM MỊN VÀ KẾT NỐI NÉT ĐỨT
-    if thin_stroke_mode:
-        img_pil = Image.fromarray(img_array.astype(np.uint8))
-        img_pil = img_pil.filter(ImageFilter.GaussianBlur(radius=0.8))
-        img_array = np.array(img_pil, dtype=np.float64)
+    if debug:
+        print(f"📊 Binary threshold: {binary_thresh:.0f}")
     
-    # BƯỚC 5: LÀM DÀY NÉT CHỮ
+    # Tạo mask nhị phân
+    binary_mask = img_array > binary_thresh
+    
+    # Áp dụng: nền = 0, nét = 255 để tối đa hóa độ tương phản
+    img_array = np.where(binary_mask, 255, 0).astype(np.float64)
+    
+    if debug:
+        stroke_pixels = np.count_nonzero(binary_mask)
+        print(f"📊 Stroke pixels sau binarization: {stroke_pixels}")
+    
+    # =========================================================================
+    # BƯỚC 5: LÀM DÀY NÉT (MORPHOLOGICAL DILATION)
+    # Đây là bước QUAN TRỌNG NHẤT cho nét bút mỏng!
+    # =========================================================================
+    
     if dilate_iterations > 0:
         img_pil = Image.fromarray(img_array.astype(np.uint8))
         
+        # Tính số lần dilate dựa trên kích thước ảnh
         scale_factor = max(original_shape) / 200.0
-        adjusted_iterations = max(dilate_iterations, int(dilate_iterations * scale_factor))
-        adjusted_iterations = min(adjusted_iterations, 8)
+        adjusted_iterations = max(dilate_iterations, int(dilate_iterations * scale_factor * 0.7))
+        adjusted_iterations = min(adjusted_iterations, 10)  # Giới hạn tối đa
         
+        if debug:
+            print(f"✏️ Dilate iterations: {adjusted_iterations} (base: {dilate_iterations}, scale: {scale_factor:.2f})")
+        
+        # Dùng MaxFilter để làm dày nét (dilation)
         for _ in range(adjusted_iterations):
             img_pil = img_pil.filter(ImageFilter.MaxFilter(size=3))
         
         img_array = np.array(img_pil, dtype=np.float64)
-        
-        if debug:
-            print(f"✏️ Đã làm dày nét {adjusted_iterations} lần")
     
-    # BƯỚC 6: MORPHOLOGICAL CLOSING
+    # =========================================================================
+    # BƯỚC 6: MORPHOLOGICAL CLOSING (ĐÚNG THỨ TỰ: Max rồi Min)
+    # Closing = Dilation + Erosion: đóng các lỗ nhỏ bên trong nét
+    # =========================================================================
+    
     if thin_stroke_mode:
         img_pil = Image.fromarray(img_array.astype(np.uint8))
-        img_pil = img_pil.filter(ImageFilter.MinFilter(size=3))
+        
+        # CLOSING = MaxFilter (dilation) rồi MinFilter (erosion)
+        # Giúp đóng các lỗ nhỏ bên trong nét chữ
         img_pil = img_pil.filter(ImageFilter.MaxFilter(size=3))
+        img_pil = img_pil.filter(ImageFilter.MinFilter(size=3))
+        
         img_array = np.array(img_pil, dtype=np.float64)
+        
+        if debug:
+            print("🔲 Đã áp dụng morphological closing (Max -> Min)")
     
-    # BƯỚC 7: NGƯỠNG ĐỘNG
-    if img_array.max() > 0:
-        non_zero_pixels = img_array[img_array > 5]
-        if len(non_zero_pixels) > 0:
-            percentile = 20 if thin_stroke_mode else 30
-            threshold = max(20, np.percentile(non_zero_pixels, percentile))
-        else:
-            threshold = 20
-    else:
-        threshold = 20
+    # =========================================================================
+    # BƯỚC 7: TÌM BOUNDING BOX VÀ CĂN GIỮA
+    # =========================================================================
     
-    # BƯỚC 8: TÌM BOUNDING BOX VÀ CĂN GIỮA
-    coords = np.where(img_array > threshold)
+    # Tìm pixels có nét
+    threshold_for_bbox = 30
+    coords = np.where(img_array > threshold_for_bbox)
     
     if len(coords[0]) > 0 and len(coords[1]) > 0:
         y_min, y_max = coords[0].min(), coords[0].max()
         x_min, x_max = coords[1].min(), coords[1].max()
         
-        padding = 8 if thin_stroke_mode else 5
+        # Thêm padding
+        padding = 5
         y_min = max(0, y_min - padding)
         y_max = min(img_array.shape[0] - 1, y_max + padding)
         x_min = max(0, x_min - padding)
@@ -162,8 +265,13 @@ def preprocess_digit_image(image_array, dilate_iterations=3, thin_stroke_mode=Tr
         
         digit_region = img_array[y_min:y_max+1, x_min:x_max+1]
         
+        if debug:
+            print(f"📦 Bounding box: ({x_min}, {y_min}) -> ({x_max}, {y_max}), size: {digit_region.shape}")
+        
+        # Resize về 20x20 (MNIST để margin 4 pixel mỗi bên)
         digit_img = Image.fromarray(digit_region.astype(np.uint8))
         
+        # Giữ tỷ lệ khung hình
         h, w = digit_region.shape
         aspect = w / h
         if aspect > 1:
@@ -173,8 +281,10 @@ def preprocess_digit_image(image_array, dilate_iterations=3, thin_stroke_mode=Tr
             new_height = 20
             new_width = max(1, int(20 * aspect))
         
+        # Resize với LANCZOS để giữ chất lượng
         digit_img = digit_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
         
+        # Tạo ảnh 28x28 với nền đen và đặt chữ số vào giữa
         final_array = np.zeros((28, 28), dtype=np.float64)
         y_offset = (28 - new_height) // 2
         x_offset = (28 - new_width) // 2
@@ -184,24 +294,92 @@ def preprocess_digit_image(image_array, dilate_iterations=3, thin_stroke_mode=Tr
         
         img_array = final_array
     else:
+        if debug:
+            print("⚠️ Không tìm thấy nét chữ, resize toàn bộ ảnh")
         img = Image.fromarray(img_array.astype(np.uint8))
         img = img.resize((28, 28), Image.Resampling.LANCZOS)
         img_array = np.array(img, dtype=np.float64)
     
-    # BƯỚC 9: LÀM DÀY THÊM SAU KHI RESIZE
+    # =========================================================================
+    # BƯỚC 8: ĐIỀU CHỈNH ĐỘ DÀY NÉT CHO PHÙ HỢP VỚI MNIST
+    # MNIST có khoảng 100-180 pixels stroke (non-zero > 0.1)
+    # Nếu quá dày, cần thin lại; nếu quá mỏng, cần dilate thêm
+    # =========================================================================
+    
+    # Đếm pixels hiện tại
+    current_pixels = np.count_nonzero(img_array > 25)  # >25 để tránh đếm nhiễu
+    
+    # MNIST có khoảng 100-180 pixels, target là ~140
+    target_min_pixels = 80
+    target_max_pixels = 200
+    target_pixels = 140
+    
+    if debug:
+        print(f"📊 Pixels trước điều chỉnh: {current_pixels} (target: {target_min_pixels}-{target_max_pixels})")
+    
     if thin_stroke_mode:
         img_pil = Image.fromarray(img_array.astype(np.uint8))
-        img_pil = img_pil.filter(ImageFilter.MaxFilter(size=3))
+        
+        if current_pixels < target_min_pixels:
+            # Nét quá mỏng, dilate thêm
+            while current_pixels < target_min_pixels:
+                img_pil = img_pil.filter(ImageFilter.MaxFilter(size=3))
+                temp_array = np.array(img_pil, dtype=np.float64)
+                current_pixels = np.count_nonzero(temp_array > 25)
+                if current_pixels >= target_max_pixels:
+                    break
+            if debug:
+                print(f"✏️ Dilate thêm, pixels = {current_pixels}")
+                
+        elif current_pixels > target_max_pixels:
+            # Nét quá dày, erosion để làm mỏng
+            erosion_count = 0
+            while current_pixels > target_max_pixels and erosion_count < 3:
+                img_pil = img_pil.filter(ImageFilter.MinFilter(size=3))
+                temp_array = np.array(img_pil, dtype=np.float64)
+                current_pixels = np.count_nonzero(temp_array > 25)
+                erosion_count += 1
+                if current_pixels < target_min_pixels:
+                    # Quá mỏng, dừng lại và dilate 1 lần
+                    img_pil = img_pil.filter(ImageFilter.MaxFilter(size=3))
+                    break
+            if debug:
+                print(f"🔍 Erosion {erosion_count} lần, pixels = {current_pixels}")
+        
         img_array = np.array(img_pil, dtype=np.float64)
     
-    # BƯỚC 10: CHUẨN HÓA VỀ [0, 1]
+    # =========================================================================
+    # BƯỚC 9: CHUẨN HÓA VỀ [0, 1] VÀ ĐẢM BẢO ĐỘ SÁNG PHÙ HỢP VỚI MNIST
+    # MNIST stroke pixels có mean ~0.7-0.75, max = 1.0
+    # =========================================================================
+    
     if img_array.max() > 0:
+        # Normalize về [0, 1]
         img_array = img_array / 255.0
+        
+        # Đảm bảo độ sáng phù hợp với MNIST
+        stroke_mask = img_array > 0.1
+        if np.any(stroke_mask):
+            current_mean = img_array[stroke_mask].mean()
+            target_mean = 0.72  # MNIST stroke mean (trung bình)
+            
+            # Điều chỉnh độ sáng
+            if abs(current_mean - target_mean) > 0.1:
+                scale_factor = target_mean / max(current_mean, 0.1)
+                scale_factor = np.clip(scale_factor, 0.7, 1.5)  # Giới hạn điều chỉnh
+                img_array = np.where(stroke_mask, img_array * scale_factor, img_array)
+                img_array = np.clip(img_array, 0, 1)
+                
+                if debug:
+                    new_mean = img_array[img_array > 0.1].mean() if np.any(img_array > 0.1) else 0
+                    print(f"💡 Điều chỉnh độ sáng: {current_mean:.2f} -> {new_mean:.2f}")
     
     img_array = np.clip(img_array, 0, 1)
     
     if debug:
-        print(f"✅ Ảnh cuối cùng: {img_array.shape}, range [{img_array.min():.3f}, {img_array.max():.3f}]")
+        non_zero = np.count_nonzero(img_array > 0.1)
+        stroke_mean = img_array[img_array > 0.1].mean() if non_zero > 0 else 0
+        print(f"✅ Kết quả: shape={img_array.shape}, pixels={non_zero}, stroke_mean={stroke_mean:.2f}")
     
     return img_array
 
@@ -269,6 +447,7 @@ def load_and_preprocess_image(image_path, dilate_iterations=3, debug=False,
     - Chữ số được căn giữa với bounding box
     - Giá trị pixel đã chuẩn hóa về [0, 1]
     - NÉT CHỮ TƯƠNG ĐỐI DÀY (2-4 pixels trong 28x28)
+    - Stroke pixels có mean ~0.7-0.75, max = 1.0
     
     Parameters:
     -----------
@@ -287,248 +466,25 @@ def load_and_preprocess_image(image_path, dilate_iterations=3, debug=False,
     --------
     np.ndarray : Ảnh 28x28 đã xử lý, chuẩn hóa về [0, 1]
     """
-    from PIL import Image, ImageFilter, ImageOps, ImageEnhance
+    from PIL import Image
     
     # Đọc ảnh và chuyển sang grayscale
     img = Image.open(image_path).convert('L')
     img_array = np.array(img, dtype=np.float64)
-    original_shape = img_array.shape
     
     if debug:
-        print(f"📷 Kích thước ảnh gốc: {img_array.shape}")
-        print(f"📊 Min/Max pixel: {img_array.min():.0f}/{img_array.max():.0f}")
-        print(f"📊 Mean pixel: {img_array.mean():.1f}")
-        print(f"🔧 Chế độ nét mỏng: {'BẬT' if thin_stroke_mode else 'TẮT'}")
+        print(f"📷 Tải ảnh từ: {image_path}")
+        print(f"📷 Kích thước: {img_array.shape}")
+        print(f"📊 Min/Max/Mean pixel: {img_array.min():.0f}/{img_array.max():.0f}/{img_array.mean():.1f}")
     
-    # =====================================================================
-    # BƯỚC 1: TĂNG CƯỜNG ĐỘ TƯƠNG PHẢN (ĐẶC BIỆT QUAN TRỌNG CHO NÉT MỎNG)
-    # =====================================================================
-    
-    img_pil = Image.fromarray(img_array.astype(np.uint8))
-    
-    # AutoContrast mạnh hơn cho nét mỏng
-    cutoff = 1 if thin_stroke_mode else 2
-    img_pil = ImageOps.autocontrast(img_pil, cutoff=cutoff)
-    
-    # Tăng contrast thêm nếu cần (cho nét nhạt)
-    if contrast_factor > 1.0:
-        enhancer = ImageEnhance.Contrast(img_pil)
-        img_pil = enhancer.enhance(contrast_factor)
-    
-    img_array = np.array(img_pil, dtype=np.float64)
-    
-    if debug:
-        print(f"📊 Sau tăng contrast (factor={contrast_factor}) - Min/Max: {img_array.min():.0f}/{img_array.max():.0f}")
-    
-    # =====================================================================
-    # BƯỚC 2: ĐẢO NGƯỢC MÀU NẾU NỀN SÁNG (MNIST CÓ NỀN ĐEN)
-    # =====================================================================
-    
-    # Kiểm tra nền: lấy giá trị ở các góc và cạnh
-    h, w = img_array.shape
-    sample_points = [
-        img_array[0, 0], img_array[0, -1], 
-        img_array[-1, 0], img_array[-1, -1],
-        img_array[0, w//2], img_array[-1, w//2],
-        img_array[h//2, 0], img_array[h//2, -1],
-        # Thêm các điểm ở gần góc để chính xác hơn
-        img_array[min(10, h-1), min(10, w-1)],
-        img_array[min(10, h-1), max(0, w-11)],
-        img_array[max(0, h-11), min(10, w-1)],
-        img_array[max(0, h-11), max(0, w-11)]
-    ]
-    background_value = np.median(sample_points)
-    
-    if debug:
-        print(f"📊 Giá trị nền (median mẫu): {background_value:.0f}")
-    
-    # Đảo màu nếu nền sáng (viết trên giấy trắng)
-    is_light_background = background_value > 127
-    if is_light_background:
-        img_array = 255 - img_array
-        if debug:
-            print("🔄 Đã đảo ngược màu (nền sáng -> nền đen)")
-    
-    # =====================================================================
-    # BƯỚC 3: XỬ LÝ NHIỄU VÀ CHUẨN BỊ CHO NÉT MỎNG
-    # =====================================================================
-    
-    if thin_stroke_mode:
-        # Với nét mỏng, ta cần loại bỏ nhiễu từ giấy nhưng giữ lại nét
-        # Dùng ngưỡng thấp hơn để giữ nét mỏng
-        noise_threshold = 15
-        img_array[img_array < noise_threshold] = 0
-        
-        if debug:
-            print(f"🧹 Đã loại bỏ nhiễu < {noise_threshold}")
-    
-    # =====================================================================
-    # BƯỚC 4: LÀM MỊN VÀ KẾT NỐI NÉT ĐỨT (MORPHOLOGICAL CLOSING)
-    # Rất quan trọng cho nét bút mỏng bị đứt đoạn!
-    # =====================================================================
-    
-    if thin_stroke_mode:
-        img_pil = Image.fromarray(img_array.astype(np.uint8))
-        
-        # Làm mờ nhẹ để kết nối các nét đứt gần nhau
-        img_pil = img_pil.filter(ImageFilter.GaussianBlur(radius=0.8))
-        
-        img_array = np.array(img_pil, dtype=np.float64)
-        
-        if debug:
-            print("🔗 Đã làm mờ nhẹ để kết nối nét đứt")
-    
-    # =====================================================================
-    # BƯỚC 5: LÀM DÀY NÉT CHỮ (MORPHOLOGICAL DILATION)
-    # Đây là bước QUAN TRỌNG NHẤT cho nét bút mỏng!
-    # =====================================================================
-    
-    if dilate_iterations > 0:
-        img_pil = Image.fromarray(img_array.astype(np.uint8))
-        
-        # Tính số lần dilate dựa trên kích thước ảnh
-        # Ảnh lớn hơn cần dilate nhiều hơn
-        scale_factor = max(original_shape) / 200.0  # 200 là kích thước tham chiếu
-        adjusted_iterations = max(dilate_iterations, int(dilate_iterations * scale_factor))
-        adjusted_iterations = min(adjusted_iterations, 8)  # Giới hạn tối đa
-        
-        if debug:
-            print(f"✏️ Số lần dilate điều chỉnh: {adjusted_iterations} (gốc: {dilate_iterations})")
-        
-        # Dùng MaxFilter để làm dày nét (tương tự dilation)
-        for i in range(adjusted_iterations):
-            img_pil = img_pil.filter(ImageFilter.MaxFilter(size=3))
-        
-        img_array = np.array(img_pil, dtype=np.float64)
-        
-        if debug:
-            print(f"✏️ Đã làm dày nét {adjusted_iterations} lần")
-    
-    # =====================================================================
-    # BƯỚC 6: MORPHOLOGICAL CLOSING ĐỂ ĐÓNG CÁC LỖ NHỎ
-    # Giúp tránh nhận nhầm thành số 8 (8 có nhiều lỗ/vòng tròn)
-    # =====================================================================
-    
-    if thin_stroke_mode:
-        img_pil = Image.fromarray(img_array.astype(np.uint8))
-        
-        # MinFilter sau MaxFilter = Closing operation
-        # Giúp làm mịn cạnh và đóng các lỗ nhỏ
-        img_pil = img_pil.filter(ImageFilter.MinFilter(size=3))
-        img_pil = img_pil.filter(ImageFilter.MaxFilter(size=3))
-        
-        img_array = np.array(img_pil, dtype=np.float64)
-        
-        if debug:
-            print("🔲 Đã áp dụng morphological closing")
-    
-    # =====================================================================
-    # BƯỚC 7: NHẬN DIỆN NGƯỠNG VÀ LỌC NHIỄU CUỐI CÙNG
-    # =====================================================================
-    
-    # Tính ngưỡng động dựa trên histogram
-    if img_array.max() > 0:
-        non_zero_pixels = img_array[img_array > 5]
-        if len(non_zero_pixels) > 0:
-            # Dùng ngưỡng thấp hơn cho nét mỏng
-            percentile = 20 if thin_stroke_mode else 30
-            threshold = max(20, np.percentile(non_zero_pixels, percentile))
-        else:
-            threshold = 20
-    else:
-        threshold = 20
-    
-    if debug:
-        print(f"📊 Ngưỡng động: {threshold:.0f}")
-    
-    # =====================================================================
-    # BƯỚC 8: TÌM BOUNDING BOX VÀ CĂN GIỮA
-    # =====================================================================
-    
-    coords = np.where(img_array > threshold)
-    
-    if len(coords[0]) > 0 and len(coords[1]) > 0:
-        y_min, y_max = coords[0].min(), coords[0].max()
-        x_min, x_max = coords[1].min(), coords[1].max()
-        
-        # Thêm padding nhỏ
-        padding = 8 if thin_stroke_mode else 5
-        y_min = max(0, y_min - padding)
-        y_max = min(img_array.shape[0] - 1, y_max + padding)
-        x_min = max(0, x_min - padding)
-        x_max = min(img_array.shape[1] - 1, x_max + padding)
-        
-        # Cắt vùng chứa chữ số
-        digit_region = img_array[y_min:y_max+1, x_min:x_max+1]
-        
-        if debug:
-            print(f"📦 Bounding box: ({x_min}, {y_min}) -> ({x_max}, {y_max})")
-            print(f"📦 Kích thước vùng chữ số: {digit_region.shape}")
-        
-        # Resize về 20x20 (MNIST để margin 4 pixel mỗi bên)
-        digit_img = Image.fromarray(digit_region.astype(np.uint8))
-        
-        # Giữ tỷ lệ khung hình
-        h, w = digit_region.shape
-        aspect = w / h
-        if aspect > 1:
-            new_width = 20
-            new_height = max(1, int(20 / aspect))
-        else:
-            new_height = 20
-            new_width = max(1, int(20 * aspect))
-        
-        # Dùng LANCZOS cho chất lượng tốt
-        digit_img = digit_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        
-        # Tạo ảnh 28x28 với nền đen và đặt chữ số vào giữa
-        final_array = np.zeros((28, 28), dtype=np.float64)
-        
-        y_offset = (28 - new_height) // 2
-        x_offset = (28 - new_width) // 2
-        
-        resized_digit = np.array(digit_img, dtype=np.float64)
-        final_array[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = resized_digit
-        
-        img_array = final_array
-    else:
-        if debug:
-            print("⚠️ Không tìm thấy chữ số, resize toàn bộ ảnh")
-        img = Image.fromarray(img_array.astype(np.uint8))
-        img = img.resize((28, 28), Image.Resampling.LANCZOS)
-        img_array = np.array(img, dtype=np.float64)
-    
-    # =====================================================================
-    # BƯỚC 9: LÀM DÀY THÊM SAU KHI RESIZE (CHO NÉT MỎNG)
-    # =====================================================================
-    
-    if thin_stroke_mode:
-        # Sau khi resize, nét có thể mỏng đi. Dilate thêm 1 lần
-        img_pil = Image.fromarray(img_array.astype(np.uint8))
-        img_pil = img_pil.filter(ImageFilter.MaxFilter(size=3))
-        img_array = np.array(img_pil, dtype=np.float64)
-        
-        if debug:
-            print("✏️ Đã làm dày thêm sau resize")
-    
-    # =====================================================================
-    # BƯỚC 10: CHUẨN HÓA VỀ [0, 1]
-    # =====================================================================
-    
-    # Normalize về [0, 1]
-    if img_array.max() > 0:
-        img_array = img_array / 255.0
-    
-    # Clip để đảm bảo trong khoảng [0, 1]
-    img_array = np.clip(img_array, 0, 1)
-    
-    if debug:
-        print(f"✅ Ảnh cuối cùng: {img_array.shape}, range [{img_array.min():.3f}, {img_array.max():.3f}]")
-        # Hiển thị mật độ pixel
-        non_zero = np.count_nonzero(img_array > 0.1)
-        print(f"📊 Mật độ nét: {non_zero}/{28*28} pixels ({non_zero/(28*28)*100:.1f}%)")
-    
-    return img_array
+    # Gọi hàm xử lý chính
+    return preprocess_digit_image(
+        img_array,
+        dilate_iterations=dilate_iterations,
+        thin_stroke_mode=thin_stroke_mode,
+        contrast_factor=contrast_factor,
+        debug=debug
+    )
 
 
 def predict_single(model, image, true_label=None, show_plot=True, original_image=None):
