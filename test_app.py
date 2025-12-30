@@ -1,25 +1,22 @@
 """
-🔢 Ứng dụng Test Model Nhận dạng Chữ số Viết tay
+🔢 Ứng dụng Desktop Test Model Nhận dạng Chữ số Viết tay
 
 Ứng dụng này cho phép bạn:
 1. Vẽ chữ số trực tiếp trên canvas
-2. Upload ảnh chữ số
-3. Xem kết quả dự đoán và xác suất
+2. Xem kết quả dự đoán và xác suất
 
 Sử dụng:
     python test_app.py
-
-Sau đó mở trình duyệt và truy cập http://localhost:7860
 """
 
-import gradio as gr
+import tkinter as tk
+from tkinter import ttk, messagebox
 import numpy as np
 import os
 import joblib
-from PIL import Image
+from PIL import Image, ImageDraw, ImageTk
 import matplotlib.pyplot as plt
-from io import BytesIO
-import base64
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 # Đường dẫn model
 MODEL_PATH = 'outputs/svm_digit_classifier.joblib'
@@ -76,381 +73,331 @@ def train_new_model():
     return model
 
 
-def preprocess_image(image):
-    """
-    Tiền xử lý ảnh đầu vào để phù hợp với model MNIST.
+class DigitRecognitionApp:
+    """Ứng dụng Desktop nhận dạng chữ số viết tay."""
     
-    QUAN TRỌNG: MNIST có các đặc điểm sau:
-    - Kích thước 28x28 pixels
-    - Nền đen (0), chữ trắng (255)
-    - Chữ số được căn giữa với bounding box
-    - Giá trị pixel đã chuẩn hóa về [0, 1]
-    
-    Parameters:
-    -----------
-    image : PIL Image or numpy array
-        Ảnh đầu vào
+    def __init__(self, root, model):
+        self.root = root
+        self.model = model
+        self.root.title("🔢 Nhận dạng Chữ số Viết tay")
+        self.root.geometry("900x600")
+        self.root.resizable(True, True)
         
-    Returns:
-    --------
-    numpy array : Ảnh đã xử lý (1, 784)
-    """
-    if image is None:
-        return None
-    
-    # Chuyển sang PIL Image nếu cần
-    if isinstance(image, np.ndarray):
-        # Nếu là ảnh từ canvas (có thể là RGBA)
-        if len(image.shape) == 3:
-            if image.shape[2] == 4:  # RGBA
-                # Lấy alpha channel (nét vẽ nằm trong alpha)
-                alpha = image[:, :, 3]
-                # Hoặc chuyển sang grayscale
-                img = Image.fromarray(image).convert('L')
-                img_array_temp = np.array(img)
-                # Kết hợp với alpha để lấy nét vẽ
-                if alpha.max() > 0:
-                    img_array_temp = alpha
-                img = Image.fromarray(img_array_temp.astype(np.uint8))
-            else:  # RGB
-                img = Image.fromarray(image).convert('L')
-        else:  # Grayscale
-            img = Image.fromarray(image.astype(np.uint8))
-    else:
-        img = image.convert('L')
-    
-    # Chuyển sang numpy array
-    img_array = np.array(img, dtype=np.float64)
-    
-    # Xác định xem nền sáng hay tối
-    # MNIST có nền đen (0), chữ trắng (255)
-    # Nếu giá trị trung bình của ảnh > 127, nghĩa là nền sáng -> đảo màu
-    if img_array.mean() > 127:
-        img_array = 255 - img_array
-    
-    # Tìm bounding box của chữ số và căn giữa (giống MNIST)
-    # Điều này rất quan trọng để ảnh vẽ tay khớp với MNIST
-    threshold = 20  # Ngưỡng để xác định pixel thuộc chữ
-    coords = np.where(img_array > threshold)
-    
-    if len(coords[0]) > 0 and len(coords[1]) > 0:
-        y_min, y_max = coords[0].min(), coords[0].max()
-        x_min, x_max = coords[1].min(), coords[1].max()
+        # Canvas size
+        self.canvas_size = 280
+        self.brush_size = 20
         
-        # Cắt vùng chứa chữ số
-        digit_region = img_array[y_min:y_max+1, x_min:x_max+1]
+        # Image để vẽ (nền đen)
+        self.image = Image.new('L', (self.canvas_size, self.canvas_size), color=0)
+        self.draw = ImageDraw.Draw(self.image)
         
-        # Resize digit region về 20x20 (MNIST để margin 4 pixel mỗi bên)
-        digit_img = Image.fromarray(digit_region.astype(np.uint8))
+        # Biến lưu vị trí chuột trước đó
+        self.last_x = None
+        self.last_y = None
         
-        # Giữ tỷ lệ khung hình
-        aspect = digit_region.shape[1] / digit_region.shape[0]
-        if aspect > 1:  # Rộng hơn cao
-            new_width = 20
-            new_height = max(1, int(20 / aspect))
-        else:  # Cao hơn rộng
-            new_height = 20
-            new_width = max(1, int(20 * aspect))
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """Thiết lập giao diện."""
+        # Main frame
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
         
-        digit_img = digit_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        # Title
+        title_label = ttk.Label(main_frame, text="🔢 Nhận dạng Chữ số Viết tay", 
+                                font=('Segoe UI', 18, 'bold'))
+        title_label.pack(pady=(0, 10))
         
-        # Tạo ảnh 28x28 với nền đen và đặt chữ số vào giữa
-        final_array = np.zeros((28, 28), dtype=np.float64)
+        subtitle_label = ttk.Label(main_frame, 
+                                   text="Vẽ một chữ số (0-9) trên canvas bên trái, sau đó nhấn 'Nhận dạng'",
+                                   font=('Segoe UI', 10))
+        subtitle_label.pack(pady=(0, 10))
         
-        # Tính vị trí để căn giữa
-        y_offset = (28 - new_height) // 2
-        x_offset = (28 - new_width) // 2
+        # Content frame (chứa canvas và kết quả)
+        content_frame = ttk.Frame(main_frame)
+        content_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Đặt chữ số vào giữa
-        final_array[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = np.array(digit_img)
+        # Left frame - Canvas vẽ
+        left_frame = ttk.LabelFrame(content_frame, text="✏️ Vẽ chữ số", padding="10")
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, padx=(0, 10))
         
-        img_array = final_array
-    else:
-        # Nếu không tìm thấy chữ, resize đơn giản
-        img = Image.fromarray(img_array.astype(np.uint8))
-        img = img.resize((28, 28), Image.Resampling.LANCZOS)
-        img_array = np.array(img, dtype=np.float64)
-    
-    # Chuẩn hóa về [0, 1] - QUAN TRỌNG: giống với cách train
-    img_array = img_array / 255.0
-    
-    # Flatten thành vector 784 chiều
-    img_flat = img_array.reshape(1, -1)
-    
-    return img_flat, img_array
-
-
-def create_probability_chart(probabilities):
-    """Tạo biểu đồ xác suất."""
-    fig, ax = plt.subplots(figsize=(10, 4))
-    
-    colors = ['#3498db' if p < max(probabilities) else '#e74c3c' for p in probabilities]
-    bars = ax.bar(range(10), probabilities, color=colors)
-    
-    ax.set_xlabel('Chữ số', fontsize=12)
-    ax.set_ylabel('Xác suất', fontsize=12)
-    ax.set_title('Phân bố xác suất dự đoán', fontsize=14)
-    ax.set_xticks(range(10))
-    ax.set_ylim([0, 1])
-    ax.grid(axis='y', alpha=0.3)
-    
-    # Thêm giá trị lên thanh
-    for bar, prob in zip(bars, probabilities):
-        if prob > 0.05:
-            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
-                   f'{prob:.1%}', ha='center', va='bottom', fontsize=9)
-    
-    plt.tight_layout()
-    return fig
-
-
-def predict_digit(image):
-    """
-    Dự đoán chữ số từ ảnh.
-    
-    Parameters:
-    -----------
-    image : PIL Image or numpy array
-        Ảnh đầu vào
+        # Canvas để vẽ
+        self.canvas = tk.Canvas(left_frame, width=self.canvas_size, height=self.canvas_size,
+                                bg='black', cursor='cross', highlightthickness=2,
+                                highlightbackground='#3498db')
+        self.canvas.pack()
         
-    Returns:
-    --------
-    tuple : (kết quả dự đoán, biểu đồ xác suất, ảnh đã xử lý)
-    """
-    if image is None:
-        return "⚠️ Vui lòng vẽ hoặc upload một ảnh chữ số!", None, None
+        # Bind mouse events
+        self.canvas.bind('<Button-1>', self.start_draw)
+        self.canvas.bind('<B1-Motion>', self.draw_on_canvas)
+        self.canvas.bind('<ButtonRelease-1>', self.stop_draw)
+        
+        # Buttons frame
+        btn_frame = ttk.Frame(left_frame)
+        btn_frame.pack(pady=10, fill=tk.X)
+        
+        # Style cho buttons
+        style = ttk.Style()
+        style.configure('Primary.TButton', font=('Segoe UI', 11, 'bold'))
+        style.configure('Secondary.TButton', font=('Segoe UI', 10))
+        
+        predict_btn = ttk.Button(btn_frame, text="🔍 Nhận dạng", 
+                                 command=self.predict, style='Primary.TButton')
+        predict_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+        
+        clear_btn = ttk.Button(btn_frame, text="🗑️ Xóa", 
+                               command=self.clear_canvas, style='Secondary.TButton')
+        clear_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+        
+        test_btn = ttk.Button(btn_frame, text="🎲 Test MNIST", 
+                              command=self.test_mnist_sample, style='Secondary.TButton')
+        test_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+        
+        # Right frame - Kết quả
+        right_frame = ttk.LabelFrame(content_frame, text="📊 Kết quả", padding="10")
+        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Result text
+        self.result_label = ttk.Label(right_frame, text="Vẽ một chữ số và nhấn 'Nhận dạng'",
+                                      font=('Segoe UI', 12), wraplength=400)
+        self.result_label.pack(pady=(0, 10))
+        
+        # Prediction display
+        self.prediction_frame = ttk.Frame(right_frame)
+        self.prediction_frame.pack(pady=10)
+        
+        self.prediction_label = ttk.Label(self.prediction_frame, text="?", 
+                                          font=('Segoe UI', 72, 'bold'),
+                                          foreground='#3498db')
+        self.prediction_label.pack()
+        
+        self.confidence_label = ttk.Label(self.prediction_frame, text="",
+                                          font=('Segoe UI', 14))
+        self.confidence_label.pack()
+        
+        # Chart frame
+        self.chart_frame = ttk.Frame(right_frame)
+        self.chart_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        
+        # Processed image frame
+        processed_frame = ttk.LabelFrame(left_frame, text="Ảnh sau xử lý (28x28)", padding="5")
+        processed_frame.pack(pady=10)
+        
+        self.processed_label = ttk.Label(processed_frame)
+        self.processed_label.pack()
     
-    try:
-        # Tiền xử lý ảnh
-        result = preprocess_image(image)
-        if result is None:
-            return "⚠️ Không thể xử lý ảnh!", None, None
+    def start_draw(self, event):
+        """Bắt đầu vẽ."""
+        self.last_x = event.x
+        self.last_y = event.y
+    
+    def draw_on_canvas(self, event):
+        """Vẽ trên canvas."""
+        if self.last_x and self.last_y:
+            # Vẽ trên Tkinter canvas
+            self.canvas.create_line(self.last_x, self.last_y, event.x, event.y,
+                                    fill='white', width=self.brush_size, 
+                                    capstyle=tk.ROUND, smooth=True)
             
-        img_flat, img_display = result
+            # Vẽ trên PIL Image
+            self.draw.line([self.last_x, self.last_y, event.x, event.y],
+                          fill=255, width=self.brush_size)
+            
+        self.last_x = event.x
+        self.last_y = event.y
+    
+    def stop_draw(self, event):
+        """Dừng vẽ."""
+        self.last_x = None
+        self.last_y = None
+    
+    def clear_canvas(self):
+        """Xóa canvas."""
+        self.canvas.delete('all')
+        self.image = Image.new('L', (self.canvas_size, self.canvas_size), color=0)
+        self.draw = ImageDraw.Draw(self.image)
+        
+        # Reset kết quả
+        self.prediction_label.config(text="?", foreground='#3498db')
+        self.confidence_label.config(text="")
+        self.result_label.config(text="Vẽ một chữ số và nhấn 'Nhận dạng'")
+        
+        # Clear chart
+        for widget in self.chart_frame.winfo_children():
+            widget.destroy()
+        
+        # Clear processed image
+        self.processed_label.config(image='')
+    
+    def preprocess_image(self, img_array):
+        """Tiền xử lý ảnh để khớp với MNIST."""
+        # Tìm bounding box của chữ số
+        threshold = 20
+        coords = np.where(img_array > threshold)
+        
+        if len(coords[0]) > 0 and len(coords[1]) > 0:
+            y_min, y_max = coords[0].min(), coords[0].max()
+            x_min, x_max = coords[1].min(), coords[1].max()
+            
+            # Cắt vùng chứa chữ số
+            digit_region = img_array[y_min:y_max+1, x_min:x_max+1]
+            
+            # Resize về 20x20
+            digit_img = Image.fromarray(digit_region.astype(np.uint8))
+            
+            # Giữ tỷ lệ
+            aspect = digit_region.shape[1] / digit_region.shape[0]
+            if aspect > 1:
+                new_width = 20
+                new_height = max(1, int(20 / aspect))
+            else:
+                new_height = 20
+                new_width = max(1, int(20 * aspect))
+            
+            digit_img = digit_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            # Tạo ảnh 28x28 với nền đen và đặt chữ số vào giữa
+            final_array = np.zeros((28, 28), dtype=np.float64)
+            
+            y_offset = (28 - new_height) // 2
+            x_offset = (28 - new_width) // 2
+            
+            final_array[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = np.array(digit_img)
+            
+            return final_array
+        else:
+            # Resize đơn giản
+            img = Image.fromarray(img_array.astype(np.uint8))
+            img = img.resize((28, 28), Image.Resampling.LANCZOS)
+            return np.array(img, dtype=np.float64)
+    
+    def predict(self):
+        """Dự đoán chữ số."""
+        # Lấy ảnh từ PIL Image
+        img_array = np.array(self.image, dtype=np.float64)
+        
+        # Kiểm tra xem có vẽ gì không
+        if img_array.max() < 10:
+            messagebox.showwarning("Cảnh báo", "Vui lòng vẽ một chữ số trước!")
+            return
+        
+        # Tiền xử lý
+        processed = self.preprocess_image(img_array)
+        
+        # Chuẩn hóa và flatten
+        img_flat = (processed / 255.0).reshape(1, -1)
         
         # Dự đoán
-        prediction = model.predict(img_flat)[0]
-        probabilities = model.predict_proba(img_flat)[0]
+        prediction = self.model.predict(img_flat)[0]
+        probabilities = self.model.predict_proba(img_flat)[0]
         confidence = probabilities[prediction]
         
-        # Tạo kết quả
-        result_text = f"""
-## 🎯 Kết quả Dự đoán
-
-### Chữ số được nhận dạng: **{prediction}**
-
-### Độ tin cậy: **{confidence:.1%}**
-
----
-
-### Top 3 dự đoán:
-"""
-        # Lấy top 3
+        # Hiển thị kết quả
+        self.prediction_label.config(text=str(prediction), foreground='#27ae60')
+        self.confidence_label.config(text=f"Độ tin cậy: {confidence:.1%}")
+        
+        # Top 3
         top3_idx = np.argsort(probabilities)[::-1][:3]
+        result_text = "Top 3 dự đoán:\n"
         for i, idx in enumerate(top3_idx):
             emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉"
-            result_text += f"\n{emoji} Chữ số **{idx}**: {probabilities[idx]:.1%}"
+            result_text += f"{emoji} Chữ số {idx}: {probabilities[idx]:.1%}\n"
+        self.result_label.config(text=result_text)
         
-        # Tạo biểu đồ
-        prob_chart = create_probability_chart(probabilities)
+        # Hiển thị biểu đồ
+        self.show_probability_chart(probabilities)
         
-        # Tạo ảnh đã xử lý để hiển thị
-        fig_processed, ax = plt.subplots(figsize=(3, 3))
-        ax.imshow(img_display, cmap='gray')
-        ax.set_title('Ảnh sau xử lý (28x28)')
-        ax.axis('off')
+        # Hiển thị ảnh đã xử lý
+        self.show_processed_image(processed)
+    
+    def show_probability_chart(self, probabilities):
+        """Hiển thị biểu đồ xác suất."""
+        # Clear previous chart
+        for widget in self.chart_frame.winfo_children():
+            widget.destroy()
+        
+        # Tạo figure
+        fig, ax = plt.subplots(figsize=(5, 2.5), dpi=80)
+        
+        colors = ['#3498db' if p < max(probabilities) else '#e74c3c' for p in probabilities]
+        bars = ax.bar(range(10), probabilities, color=colors)
+        
+        ax.set_xlabel('Chữ số', fontsize=9)
+        ax.set_ylabel('Xác suất', fontsize=9)
+        ax.set_xticks(range(10))
+        ax.set_ylim([0, 1])
+        ax.grid(axis='y', alpha=0.3)
+        
         plt.tight_layout()
         
-        return result_text, prob_chart, fig_processed
+        # Embed vào Tkinter
+        canvas = FigureCanvasTkAgg(fig, master=self.chart_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         
-    except Exception as e:
-        return f"❌ Lỗi: {str(e)}", None, None
-
-
-def predict_from_canvas(canvas_data):
-    """Xử lý dữ liệu từ canvas vẽ."""
-    if canvas_data is None:
-        return "⚠️ Vui lòng vẽ một chữ số!", None, None
+        plt.close(fig)
     
-    # Canvas data có thể là dict với key 'composite' hoặc trực tiếp là image
-    if isinstance(canvas_data, dict):
-        image = canvas_data.get('composite', None)
-        if image is None:
-            image = canvas_data.get('image', None)
-    else:
-        image = canvas_data
-    
-    return predict_digit(image)
-
-
-def predict_from_upload(image):
-    """Xử lý ảnh upload."""
-    return predict_digit(image)
-
-
-def test_with_mnist_sample():
-    """Test với một mẫu từ MNIST."""
-    from sklearn.datasets import fetch_openml
-    
-    print("📥 Đang tải một mẫu từ MNIST...")
-    X, y = fetch_openml('mnist_784', version=1, return_X_y=True, as_frame=False, parser='auto')
-    
-    # Lấy ngẫu nhiên một mẫu
-    idx = np.random.randint(0, len(X))
-    sample = X[idx].reshape(28, 28)
-    true_label = int(y[idx])
-    
-    # Dự đoán
-    img_flat = X[idx].reshape(1, -1).astype(np.float32) / 255.0
-    prediction = model.predict(img_flat)[0]
-    probabilities = model.predict_proba(img_flat)[0]
-    confidence = probabilities[prediction]
-    
-    result_text = f"""
-## 🎯 Test với mẫu MNIST
-
-### Nhãn thực tế: **{true_label}**
-### Dự đoán: **{prediction}**
-### Độ tin cậy: **{confidence:.1%}**
-### Kết quả: **{'✅ Đúng!' if prediction == true_label else '❌ Sai!'}**
-"""
-    
-    # Tạo biểu đồ
-    prob_chart = create_probability_chart(probabilities)
-    
-    # Tạo ảnh mẫu
-    fig_sample, ax = plt.subplots(figsize=(3, 3))
-    ax.imshow(sample, cmap='gray')
-    ax.set_title(f'Mẫu MNIST (Label: {true_label})')
-    ax.axis('off')
-    plt.tight_layout()
-    
-    return result_text, prob_chart, fig_sample
-
-
-# ============================================================================
-# TẢI MODEL
-# ============================================================================
-
-print("="*60)
-print("🔢 ỨNG DỤNG TEST NHẬN DẠNG CHỮ SỐ VIẾT TAY")
-print("="*60)
-
-model = load_model()
-print("✅ Model đã sẵn sàng!")
-
-
-# ============================================================================
-# TẠO GIAO DIỆN GRADIO
-# ============================================================================
-
-# CSS tùy chỉnh
-custom_css = """
-.gradio-container {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-}
-.main-title {
-    text-align: center;
-    color: #2c3e50;
-}
-"""
-
-# Tạo giao diện
-with gr.Blocks(css=custom_css, title="🔢 Test Nhận dạng Chữ số") as demo:
-    gr.Markdown("""
-    # 🔢 Ứng dụng Test Nhận dạng Chữ số Viết tay
-    
-    Ứng dụng sử dụng **mô hình SVM** được huấn luyện trên bộ dữ liệu **MNIST** để nhận dạng chữ số viết tay từ 0-9.
-    
-    ---
-    """)
-    
-    with gr.Tabs():
-        # Tab 1: Vẽ chữ số
-        with gr.TabItem("✏️ Vẽ chữ số"):
-            gr.Markdown("### Vẽ một chữ số (0-9) trên canvas bên dưới")
-            
-            with gr.Row():
-                with gr.Column(scale=1):
-                    canvas = gr.Sketchpad(
-                        label="Vẽ chữ số tại đây",
-                        brush=gr.Brush(colors=["#FFFFFF"], default_size=20),
-                        canvas_size=(280, 280),
-                        type="numpy"
-                    )
-                    draw_btn = gr.Button("🔍 Nhận dạng", variant="primary", size="lg")
-                    clear_btn = gr.ClearButton(canvas, value="🗑️ Xóa")
-                
-                with gr.Column(scale=1):
-                    draw_result = gr.Markdown(label="Kết quả")
-                    draw_chart = gr.Plot(label="Biểu đồ xác suất")
-                    draw_processed = gr.Plot(label="Ảnh đã xử lý")
-            
-            draw_btn.click(
-                fn=predict_from_canvas,
-                inputs=[canvas],
-                outputs=[draw_result, draw_chart, draw_processed]
-            )
+    def show_processed_image(self, processed):
+        """Hiển thị ảnh đã xử lý."""
+        # Scale lên để dễ nhìn
+        img = Image.fromarray(processed.astype(np.uint8))
+        img = img.resize((84, 84), Image.Resampling.NEAREST)
         
-        # Tab 2: Upload ảnh
-        with gr.TabItem("📤 Upload ảnh"):
-            gr.Markdown("### Upload một ảnh chữ số viết tay")
-            gr.Markdown("*Lưu ý: Ảnh nên có nền sáng và chữ tối, hoặc ngược lại*")
-            
-            with gr.Row():
-                with gr.Column(scale=1):
-                    upload_image = gr.Image(
-                        label="Upload ảnh",
-                        type="pil",
-                        sources=["upload", "clipboard"]
-                    )
-                    upload_btn = gr.Button("🔍 Nhận dạng", variant="primary", size="lg")
-                
-                with gr.Column(scale=1):
-                    upload_result = gr.Markdown(label="Kết quả")
-                    upload_chart = gr.Plot(label="Biểu đồ xác suất")
-                    upload_processed = gr.Plot(label="Ảnh đã xử lý")
-            
-            upload_btn.click(
-                fn=predict_from_upload,
-                inputs=[upload_image],
-                outputs=[upload_result, upload_chart, upload_processed]
-            )
+        photo = ImageTk.PhotoImage(img)
+        self.processed_label.config(image=photo)
+        self.processed_label.image = photo  # Giữ reference
+    
+    def test_mnist_sample(self):
+        """Test với mẫu ngẫu nhiên từ MNIST."""
+        from sklearn.datasets import fetch_openml
         
-        # Tab 3: Test với MNIST
-        with gr.TabItem("🎲 Test với MNIST"):
-            gr.Markdown("### Test với một mẫu ngẫu nhiên từ bộ dữ liệu MNIST")
+        self.result_label.config(text="Đang tải mẫu MNIST...")
+        self.root.update()
+        
+        try:
+            X, y = fetch_openml('mnist_784', version=1, return_X_y=True, as_frame=False, parser='auto')
             
-            with gr.Row():
-                with gr.Column(scale=1):
-                    mnist_btn = gr.Button("🎲 Lấy mẫu ngẫu nhiên", variant="primary", size="lg")
-                
-                with gr.Column(scale=2):
-                    mnist_result = gr.Markdown(label="Kết quả")
+            # Lấy ngẫu nhiên một mẫu
+            idx = np.random.randint(0, len(X))
+            sample = X[idx].reshape(28, 28)
+            true_label = int(y[idx])
             
-            with gr.Row():
-                mnist_sample = gr.Plot(label="Mẫu MNIST")
-                mnist_chart = gr.Plot(label="Biểu đồ xác suất")
+            # Dự đoán
+            img_flat = X[idx].reshape(1, -1).astype(np.float64) / 255.0
+            prediction = self.model.predict(img_flat)[0]
+            probabilities = self.model.predict_proba(img_flat)[0]
+            confidence = probabilities[prediction]
             
-            mnist_btn.click(
-                fn=test_with_mnist_sample,
-                inputs=[],
-                outputs=[mnist_result, mnist_chart, mnist_sample]
-            )
-    
-    gr.Markdown("""
-    ---
-    ### 📖 Hướng dẫn sử dụng:
-    
-    1. **Vẽ chữ số**: Sử dụng chuột để vẽ một chữ số trên canvas, sau đó nhấn "Nhận dạng"
-    2. **Upload ảnh**: Tải lên một ảnh chữ số viết tay để nhận dạng
-    3. **Test với MNIST**: Nhấn nút để test model với một mẫu ngẫu nhiên từ tập dữ liệu MNIST
-    
-    ### 📊 Thông tin model:
-    - **Thuật toán**: Support Vector Machine (SVM)
-    - **Kernel**: RBF (Radial Basis Function)
-    - **Dữ liệu huấn luyện**: MNIST (60,000 ảnh chữ số viết tay)
-    """)
+            # Hiển thị trên canvas
+            self.clear_canvas()
+            
+            # Scale sample lên để vẽ trên canvas
+            sample_scaled = Image.fromarray(sample.astype(np.uint8))
+            sample_scaled = sample_scaled.resize((self.canvas_size, self.canvas_size), 
+                                                  Image.Resampling.NEAREST)
+            photo = ImageTk.PhotoImage(sample_scaled)
+            self.canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+            self.canvas.image = photo  # Giữ reference
+            
+            # Hiển thị kết quả
+            is_correct = prediction == true_label
+            color = '#27ae60' if is_correct else '#e74c3c'
+            self.prediction_label.config(text=str(prediction), foreground=color)
+            self.confidence_label.config(text=f"Độ tin cậy: {confidence:.1%}")
+            
+            result_text = f"Nhãn thực tế: {true_label}\n"
+            result_text += f"Dự đoán: {prediction}\n"
+            result_text += f"Kết quả: {'✅ Đúng!' if is_correct else '❌ Sai!'}"
+            self.result_label.config(text=result_text)
+            
+            # Hiển thị biểu đồ
+            self.show_probability_chart(probabilities)
+            
+            # Hiển thị ảnh đã xử lý
+            self.show_processed_image(sample)
+            
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể tải MNIST: {str(e)}")
 
 
 # ============================================================================
@@ -458,12 +405,16 @@ with gr.Blocks(css=custom_css, title="🔢 Test Nhận dạng Chữ số") as de
 # ============================================================================
 
 if __name__ == "__main__":
-    print("\n🚀 Khởi động ứng dụng...")
-    print("📍 Truy cập: http://localhost:7860")
-    print("📍 Hoặc: http://0.0.0.0:7860")
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=False,
-        show_error=True
-    )
+    print("="*60)
+    print("🔢 ỨNG DỤNG DESKTOP NHẬN DẠNG CHỮ SỐ VIẾT TAY")
+    print("="*60)
+    
+    # Tải model
+    model = load_model()
+    print("✅ Model đã sẵn sàng!")
+    
+    # Tạo và chạy ứng dụng
+    print("\n🚀 Khởi động ứng dụng desktop...")
+    root = tk.Tk()
+    app = DigitRecognitionApp(root, model)
+    root.mainloop()

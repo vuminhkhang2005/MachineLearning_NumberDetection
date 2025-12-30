@@ -93,25 +93,20 @@ python train_svm_model.py --samples 30000 --C 10.0 --gamma 0.01
 
 ## 🧪 Test Model
 
-### Cách 1: Ứng dụng Web (Gradio)
+### Cách 1: Ứng dụng Desktop (Tkinter)
 
-Ứng dụng web cho phép bạn vẽ chữ số hoặc upload ảnh để test model.
+Ứng dụng desktop cho phép bạn vẽ chữ số để test model.
 
 ```bash
-# Cài đặt Gradio
-pip install gradio
-
-# Chạy ứng dụng web
+# Chạy ứng dụng desktop
 python test_app.py
 ```
 
-Sau đó mở trình duyệt và truy cập: http://localhost:7860
-
 **Tính năng:**
 - ✏️ Vẽ chữ số trực tiếp trên canvas
-- 📤 Upload ảnh chữ số viết tay
 - 🎲 Test với mẫu ngẫu nhiên từ MNIST
 - 📊 Hiển thị biểu đồ xác suất dự đoán
+- 🖼️ Xem ảnh đã xử lý (28x28)
 
 ### Cách 2: Command Line (CLI)
 
@@ -141,7 +136,7 @@ python test_model_cli.py --no-plot
 ├── svm_digit_recognition.ipynb    # Jupyter Notebook (Google Colab)
 ├── svm_digit_recognition.py       # Python script huấn luyện (cũ)
 ├── train_svm_model.py             # 🆕 Script train model cải tiến (KHUYẾN NGHỊ)
-├── test_app.py                    # Ứng dụng web test (Gradio)
+├── test_app.py                    # Ứng dụng desktop test (Tkinter)
 ├── test_model_cli.py              # CLI test model
 ├── svm_digit_classifier.joblib    # Mô hình đã train (copy ở root)
 └── outputs/                       # Thư mục đầu ra (tự động tạo)

@@ -8,7 +8,7 @@ seaborn>=0.11.0
 scikit-learn>=1.0.0
 joblib>=1.1.0
 Pillow>=9.0.0
-gradio>=4.0.0
+# Tkinter thường có sẵn trong Python (python3-tk)
 
 # Optional: For GPU acceleration on Google Colab
 # Uncomment and run: pip install cuml-cu11 --extra-index-url=https://pypi.nvidia.com
