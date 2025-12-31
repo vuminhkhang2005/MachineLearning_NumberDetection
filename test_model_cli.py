@@ -60,7 +60,22 @@ def preprocess_digit_image(image_array, dilate_iterations=3, thin_stroke_mode=Tr
     --------
     np.ndarray : Ảnh 28x28 đã xử lý, chuẩn hóa về [0, 1], dạng (28, 28)
     """
-    from PIL import Image, ImageFilter, ImageOps, ImageEnhance
+    # Ưu tiên pipeline OpenCV mới (mạnh cho ảnh chụp thật: bóng/ánh sáng không đều).
+    # Nếu OpenCV không có, fallback sang pipeline PIL cũ (giữ tương thích).
+    try:
+        from mnist_preprocessing import PreprocessParams, preprocess_digit_to_mnist
+
+        params = PreprocessParams(
+            dilate_iterations=int(dilate_iterations) if thin_stroke_mode else 0,
+            # Với ảnh nét mỏng: tăng padding và giữ close/open mặc định
+            pad_px=10 if thin_stroke_mode else 8,
+            adaptive_C=10 if thin_stroke_mode else 7,
+            adaptive_block_size=31,
+        )
+        return preprocess_digit_to_mnist(image_array, params=params, debug=debug)
+    except Exception:
+        # Fallback: pipeline PIL cũ (bên dưới)
+        from PIL import Image, ImageFilter, ImageOps, ImageEnhance
     
     # Đảm bảo là float64
     img_array = image_array.astype(np.float64)
