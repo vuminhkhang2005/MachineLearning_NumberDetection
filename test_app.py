@@ -14,23 +14,55 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import numpy as np
 import os
-import joblib
 from PIL import Image, ImageDraw, ImageTk
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+# matplotlib chỉ cần để vẽ biểu đồ xác suất trong GUI.
+try:
+    import matplotlib.pyplot as plt  # type: ignore
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg  # type: ignore
+except Exception:  # pragma: no cover
+    plt = None
+    FigureCanvasTkAgg = None
+
+# joblib chỉ cần cho model sklearn cũ; model scratch (.npz) không cần.
+try:
+    import joblib  # type: ignore
+except Exception:  # pragma: no cover
+    joblib = None
 
 # Đường dẫn model
 MODEL_PATH = 'outputs/svm_digit_classifier.joblib'
 FALLBACK_MODEL_PATH = 'svm_digit_classifier.joblib'
+SCRATCH_MODEL_PATH = 'outputs/svm_digit_classifier_scratch.npz'
+SCRATCH_FALLBACK_MODEL_PATH = 'svm_digit_classifier_scratch.npz'
 
 
 def load_model():
     """Tải model đã train."""
+    # Ưu tiên model from-scratch (không sklearn), định dạng .npz
+    if os.path.exists(SCRATCH_MODEL_PATH):
+        print(f"📥 Đang tải model (scratch) từ {SCRATCH_MODEL_PATH}...")
+        from svm_scratch_model import ScratchSVM
+
+        return ScratchSVM.load_npz(SCRATCH_MODEL_PATH)
+    if os.path.exists(SCRATCH_FALLBACK_MODEL_PATH):
+        print(f"📥 Đang tải model (scratch) từ {SCRATCH_FALLBACK_MODEL_PATH}...")
+        from svm_scratch_model import ScratchSVM
+
+        return ScratchSVM.load_npz(SCRATCH_FALLBACK_MODEL_PATH)
+
+    # Fallback: model sklearn cũ (.joblib)
     if os.path.exists(MODEL_PATH):
-        print(f"📥 Đang tải model từ {MODEL_PATH}...")
+        if joblib is None:
+            raise ImportError("Missing dependency 'joblib' to load sklearn .joblib model. "
+                              "Please install requirements or train the scratch model (.npz).")
+        print(f"📥 Đang tải model (sklearn) từ {MODEL_PATH}...")
         return joblib.load(MODEL_PATH)
     elif os.path.exists(FALLBACK_MODEL_PATH):
-        print(f"📥 Đang tải model từ {FALLBACK_MODEL_PATH}...")
+        if joblib is None:
+            raise ImportError("Missing dependency 'joblib' to load sklearn .joblib model. "
+                              "Please install requirements or train the scratch model (.npz).")
+        print(f"📥 Đang tải model (sklearn) từ {FALLBACK_MODEL_PATH}...")
         return joblib.load(FALLBACK_MODEL_PATH)
     else:
         print("⚠️ Không tìm thấy model đã train. Đang huấn luyện model mới...")
@@ -39,39 +71,63 @@ def load_model():
 
 def train_new_model():
     """Huấn luyện model mới nếu chưa có."""
-    from sklearn.datasets import fetch_openml
-    from sklearn.model_selection import train_test_split
-    from sklearn.svm import SVC
-    
-    print("📥 Đang tải dữ liệu MNIST...")
-    X, y = fetch_openml('mnist_784', version=1, return_X_y=True, as_frame=False, parser='auto')
-    y = y.astype(int)
-    # Chuẩn hóa đơn giản về [0, 1] - KHÔNG dùng StandardScaler
-    X = X.astype(np.float64) / 255.0
-    
-    # Sử dụng 30000 mẫu để train (cân bằng giữa tốc độ và độ chính xác)
-    X_train, _, y_train, _ = train_test_split(X, y, train_size=30000, random_state=42, stratify=y)
-    
-    print("🏋️ Đang huấn luyện model SVM...")
-    print("   (Quá trình này có thể mất vài phút...)")
-    
-    # KHÔNG dùng Pipeline với StandardScaler - tránh vấn đề không khớp khi dự đoán
-    model = SVC(
-        kernel='rbf', 
-        C=10.0,  # Tối ưu cho MNIST
-        gamma=0.01,  # Tối ưu cho MNIST
-        probability=True, 
-        cache_size=2000,
-        random_state=42
-    )
-    model.fit(X_train, y_train)
-    
-    # Lưu model
-    os.makedirs('outputs', exist_ok=True)
-    joblib.dump(model, MODEL_PATH)
-    print(f"✅ Đã lưu model tại {MODEL_PATH}")
-    
-    return model
+    # Mặc định: train nhanh model scratch nếu môi trường có TensorFlow.
+    # Nếu không có, fallback sang sklearn như cũ.
+    try:
+        from tensorflow.keras.datasets import mnist  # type: ignore
+
+        from svm_scratch_model import RFFMap, ScratchSVM, mnist_flatten_normalize
+
+        print("📥 Đang tải dữ liệu MNIST (keras.datasets)...")
+        (x_train, y_train), _ = mnist.load_data()
+        X = mnist_flatten_normalize(x_train)
+        y = y_train.astype(np.int64)
+
+        n = min(20000, X.shape[0])
+        X = X[:n]
+        y = y[:n]
+
+        print("🏋️ Đang huấn luyện model SVM (scratch, RFF)...")
+        model = ScratchSVM(n_classes=10, feature_map="rff")
+        model.rff = RFFMap.create(in_dim=X.shape[1], rff_dim=1024, gamma=0.05, seed=42)
+        model.fit(X, y, epochs=10, batch_size=1024, reg_lambda=1e-4, lr=0.5, seed=42, verbose=True)
+
+        os.makedirs("outputs", exist_ok=True)
+        model.save_npz(SCRATCH_MODEL_PATH)
+        print(f"✅ Đã lưu model (scratch) tại {SCRATCH_MODEL_PATH}")
+        return model
+    except Exception:
+        if joblib is None:
+            raise ImportError(
+                "Không thể train scratch (thiếu tensorflow) và cũng thiếu joblib/sklearn để train fallback. "
+                "Hãy chạy trên Google Colab bằng `train_svm_scratch_colab.py` để tạo file .npz."
+            )
+        from sklearn.datasets import fetch_openml
+        from sklearn.model_selection import train_test_split
+        from sklearn.svm import SVC
+
+        print("📥 Đang tải dữ liệu MNIST (OpenML)...")
+        X, y = fetch_openml('mnist_784', version=1, return_X_y=True, as_frame=False, parser='auto')
+        y = y.astype(int)
+        X = X.astype(np.float64) / 255.0
+
+        X_train, _, y_train, _ = train_test_split(X, y, train_size=30000, random_state=42, stratify=y)
+
+        print("🏋️ Đang huấn luyện model SVM (sklearn fallback)...")
+        model = SVC(
+            kernel='rbf',
+            C=10.0,
+            gamma=0.01,
+            probability=True,
+            cache_size=2000,
+            random_state=42,
+        )
+        model.fit(X_train, y_train)
+
+        os.makedirs('outputs', exist_ok=True)
+        joblib.dump(model, MODEL_PATH)
+        print(f"✅ Đã lưu model tại {MODEL_PATH}")
+        return model
 
 
 class DigitRecognitionApp:
@@ -354,6 +410,15 @@ class DigitRecognitionApp:
     
     def show_probability_chart(self, probabilities):
         """Hiển thị biểu đồ xác suất."""
+        if plt is None or FigureCanvasTkAgg is None:
+            # Không có matplotlib: chỉ hiển thị text ở result_label
+            top3_idx = np.argsort(probabilities)[::-1][:3]
+            msg = "📈 Xác suất (matplotlib không có sẵn)\n"
+            for i, idx in enumerate(top3_idx):
+                msg += f"- {idx}: {probabilities[idx]:.1%}\n"
+            self.result_label.config(text=msg)
+            return
+
         # Clear previous chart
         for widget in self.chart_frame.winfo_children():
             widget.destroy()
