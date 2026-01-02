@@ -91,6 +91,20 @@ python train_svm_model.py --quick
 python train_svm_model.py --samples 30000 --C 10.0 --gamma 0.01
 ```
 
+### 🆕 Train SVM **tự code (không sklearn)** trên Google Colab (khuyến nghị theo yêu cầu)
+
+Repo đã có implementation SVM **from-scratch bằng NumPy** (OVR hinge-loss SGD) + tuỳ chọn **RFF** để xấp xỉ RBF-kernel SVM.
+
+```bash
+# Trên Google Colab (không dùng sklearn):
+python train_svm_scratch_colab.py --feature-map rff --rff-dim 2048 --gamma 0.05 --epochs 20
+```
+
+Đầu ra sẽ được lưu tại:
+- `outputs/svm_digit_classifier_scratch.npz`
+
+CLI/Desktop app sẽ **tự ưu tiên load** file `.npz` này nếu tồn tại.
+
 ## 🧪 Test Model
 
 ### Cách 1: Ứng dụng Desktop (Tkinter)
